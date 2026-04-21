@@ -1,0 +1,81 @@
+# ================================
+# SECRETOS - NUNCA SUBIR
+# ================================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# ================================
+# Python / Backend
+# ================================
+# Entorno virtual
+venv/
+env/
+ENV/
+.venv/
+
+# Bytecode y cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Distribución
+build/
+dist/
+*.egg
+
+# ================================
+# Node.js / Frontend
+# ================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output de Vite
+dist/
+dist-ssr/
+*.local
+
+# ================================
+# Datos (opcional — ver README)
+# ================================
+# Parquets generados por la ingesta. Descomenta si no quieres subirlos.
+# data/processed/
+
+# Si los CSVs crudos son pesados, considera usar Git LFS
+# data/raw/
+
+# ================================
+# Editor / IDE
+# ================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ================================
+# Logs
+# ================================
+*.log
+logs/
+
+# ================================
+# Coverage / Testing
+# ================================
+.coverage
+htmlcov/
+coverage.xml
+.nyc_output/
