@@ -25,6 +25,7 @@ Tres capas con responsabilidades separadas:
  │   data.parquet              │  ← ~67K filas crudas
  │   by_minute.parquet         │  ← agregado por minuto
  │   by_hour.parquet           │  ← agregado por hora
+ │   forecast.parquet          │  ← modelo de predicción
  │   summary.json              │  ← KPIs globales
  └─────────────────────────────┘
          │
