@@ -2,7 +2,7 @@
 
 Aplicación web para explorar y conversar con datos históricos de disponibilidad de tiendas de Rappi. Combina un dashboard de visualización con un asistente conversacional basado en un modelo de lenguaje grande (LLM) con function calling.
 
-**Stack:** FastAPI (Python) · React + Vite · Recharts · Groq (LLM) · Pandas + Parquet
+**Stack:** FastAPI (Python) · React + Vite · Recharts · Groq (LLM) · Pandas + Parquet · scikit-learn (ML)
 
 ---
 
@@ -65,7 +65,7 @@ rappi-dashboard/
 │   │   ├── ChatBot.jsx        # widget flotante del chat
 │   │   ├── ChatBot.css
 │   │   ├── api.js             # capa única de llamadas al backend
-│   │   ├── ForecastChart.jsx
+│   │   ├── ForecastChart.jsx  # componente de predicción a 7 días
 │   │   ├── ForecastChart.css
 │   │   └── index.css
 │   └── package.json
@@ -89,7 +89,7 @@ rappi-dashboard/
 cd backend
 python -m venv venv
 source venv/bin/activate              # Windows: venv\Scripts\activate
-pip install fastapi uvicorn pandas pyarrow pydantic python-dotenv groq
+pip install fastapi uvicorn pandas pyarrow pydantic python-dotenv groq scikit-learn
 ```
 
 Crear archivo `.env` con tu API key de Groq:
@@ -211,6 +211,29 @@ df["z_score"] = (df["rate_per_sec"] - df["hourly_mean"]) / df["hourly_std"]
 
 **Por qué:** las 8 pm siempre son pico de actividad. Comparar contra un promedio global produciría muchos falsos positivos. Ajustando por hora, se encuentran los momentos que son inusuales *dentro de su propio contexto horario*.
 
+### 8. Modelo de predicción de cierres con RandomForest
+
+Se entrenó un `RandomForestRegressor` (scikit-learn) para predecir la tasa de cierres (`rate_down`) hora por hora durante los próximos 7 días. La decisión de modelar **solo cierres** fue deliberada: se evaluaron ambas direcciones (aperturas y cierres) y el modelo de aperturas fue descartado por baja calidad predictiva (R² < 0.3), ya que las aperturas presentan picos extraordinarios difíciles de capturar con features puramente temporales.
+
+**Features utilizadas:** encoding cíclico de hora y día de la semana, flag de fin de semana, y dos lag features: valor de hace 24 horas y promedio móvil de las últimas 24 horas. El encoding cíclico es clave para que el modelo entienda que la hora 23 es adyacente a la hora 0, sin romper la continuidad del ciclo.
+
+**Agregación con mediana:** los datos se agregan a nivel hora usando la mediana en lugar del promedio, porque hay picos extremos (±19K/s) que contaminan los promedios. La mediana es robusta a outliers y captura el valor típico de cada franja.
+
+**Split temporal:** los últimos 2 días se reservan como test set, simulando el escenario real de predecir el futuro viendo solo el pasado. No se usa shuffle aleatorio para evitar information leak.
+
+**Banda de confianza:** el forecast incluye un intervalo de ±1.96 × desviación estándar de los residuos del test set, aproximando una banda de confianza del 95%.
+
+```python
+model = RandomForestRegressor(
+    n_estimators=200,
+    max_depth=8,
+    min_samples_leaf=2,
+    random_state=42,
+)
+```
+
+El resultado se guarda en `forecast.parquet` y queda disponible tanto en el dashboard visual como en el chatbot semántico.
+
 ---
 
 ## 🤖 El chatbot conversacional
@@ -235,7 +258,7 @@ LLM redacta respuesta en español con los números exactos
 
 Esto garantiza que **cada cifra que el chatbot reporta viene literalmente del dataset**, no de la "imaginación" del modelo. Cero alucinaciones numéricas.
 
-### Las 7 funciones disponibles para el LLM
+### Las 9 funciones disponibles para el LLM
 
 | Función | Clase de pregunta que resuelve |
 |---|---|
@@ -244,17 +267,21 @@ Esto garantiza que **cada cifra que el chatbot reporta viene literalmente del da
 | `get_day_stats` | "¿Cómo son los domingos?" |
 | `find_extreme_events` | "¿Cuándo hubo más aperturas?" |
 | `compare_two_periods` | "Compara el lunes con el martes" |
-| **`rank_by_dimension`** | "¿Qué hora tiene más X?" (escanea las 24 o los 7) |
+| `rank_by_dimension` | "¿Qué hora tiene más X?" (escanea las 24 o los 7) |
 | `get_date_range_stats` | "¿Cómo fue del 3 al 5 de febrero?" |
+| **`get_forecast_summary`** | "¿Qué predice el modelo para la próxima semana?" / "¿Qué tan bueno es el modelo?" |
+| **`get_forecast_for_date`** | "¿Cuántos cierres espera el modelo el próximo sábado?" / "¿A qué hora será el pico el 2026-02-15?" |
 
-La función más expresiva es `rank_by_dimension`: soporta 7 métricas × 2 dimensiones = 14 combinaciones de ranking distintas con una sola interfaz.
+Las dos últimas funciones acceden al `forecast.parquet` generado por `model.py` y reportan predicciones con banda de confianza. Si el usuario pregunta por **aperturas futuras**, el chatbot aclara explícitamente que ese modelo no está disponible por decisión de calidad (R² < 0.3).
+
+La función más expresiva del histórico sigue siendo `rank_by_dimension`: soporta 7 métricas × 2 dimensiones = 14 combinaciones de ranking distintas con una sola interfaz.
 
 ### System prompt dinámico
 
 El contexto que recibe el LLM se construye en cada request con los KPIs actuales del dataset:
 
 ```python
-def build_system_prompt(summary):
+def build_system_prompt(summary, has_forecast=False):
     m = list(summary["metrics"].values())[0]
     return f"""...
     Rango: {p['start']} → {p['end']}
@@ -263,7 +290,7 @@ def build_system_prompt(summary):
     ..."""
 ```
 
-Si los datos se actualizan, el chatbot se adapta automáticamente sin modificar código.
+Cuando `has_forecast=True`, el prompt incluye instrucciones adicionales sobre las dos tools de predicción y recuerda al modelo que solo existen predicciones de cierres. Si los datos se actualizan, el chatbot se adapta automáticamente sin modificar código.
 
 ### Robustez ante fallos del modelo
 
@@ -282,7 +309,7 @@ for current_model in models_to_try:
 
 ## 🤖 Uso de Inteligencia Artificial en el desarrollo
 
-La inteligencia artificial se usó en dos dimensiones distintas del proyecto: **(a)** como herramienta de productividad durante el desarrollo, y **(b)** como componente funcional dentro de la aplicación entregada (el chatbot). Ambos usos respondieron a decisiones explícitas, no a adopción automática.
+La inteligencia artificial se usó en dos dimensiones distintas del proyecto: **(a)** como herramienta de productividad durante el desarrollo, y **(b)** como componente funcional dentro de la aplicación entregada (el chatbot y el modelo de predicción). Ambos usos respondieron a decisiones explícitas, no a adopción automática.
 
 ### Herramientas utilizadas
 
@@ -290,6 +317,7 @@ La inteligencia artificial se usó en dos dimensiones distintas del proyecto: **
 |---|---|---|
 | **Claude (Anthropic)** | Diálogo arquitectónico, revisión de decisiones técnicas, depuración | Modelo fuerte en razonamiento, bueno para discutir compensaciones de diseño |
 | **Groq (GPT-OSS 120B + Llama 3.3)** | LLM que potencia el chatbot en la aplicación final | Gratuito, function calling nativo, latencia muy baja por hardware LPU |
+| **scikit-learn (RandomForestRegressor)** | Modelo de ML para predicción de cierres a 7 días | Robusto con datasets pequeños, no requiere escalado, captura interacciones no lineales automáticamente, y permite comparar fácilmente el R² de aperturas vs. cierres para tomar decisiones basadas en calidad |
 | **GitHub Copilot / asistencia en editor** | Autocompletado de fragmentos conocidos | Acelera tareas repetitivas sin reemplazar criterio |
 
 ### Cómo se usó la IA durante el desarrollo
@@ -310,7 +338,6 @@ La arquitectura es **function calling** (tool use): el LLM no accede directament
 2. **Seguridad** — el modelo nunca ejecuta código arbitrario; solo puede invocar las funciones que se le exponen explícitamente.
 3. **Trazabilidad** — cada respuesta registra qué función se invocó y con qué argumentos, visible en la interfaz.
 
-
 ---
 
 ## 📋 Endpoints disponibles
@@ -325,6 +352,7 @@ La arquitectura es **function calling** (tool use): el LLM no accede directament
 | GET | `/api/daily-pattern` | Promedios por día de la semana |
 | GET | `/api/heatmap` | Matriz día × hora con flujo neto |
 | GET | `/api/anomalies` | Detección de anomalías por z-score |
+| GET | `/api/forecast` | Predicción de cierres para los próximos 7 días |
 | POST | `/api/chat` | Chatbot conversacional |
 
 Documentación interactiva disponible en `http://localhost:8000/docs`.
@@ -339,7 +367,8 @@ Documentación interactiva disponible en `http://localhost:8000/docs`.
 4. **Bar charts apilados** — patrón por hora del día y por día de la semana, mostrando ambos signos
 5. **Tablas lado a lado** — top 10 picos de apertura y top 10 picos de cierre
 6. **Tabla de anomalías** — con selector de umbral configurable (2σ, 3σ, 4σ, 5σ)
-7. **Chatbot flotante** — widget abajo a la derecha, con preguntas sugeridas e indicador de escritura
+7. **Gráfico de predicción a 7 días** — visualización del forecast de cierres hora por hora con banda de confianza del 95% (área sombreada). Incluye métricas de calidad del modelo (R², MAE, RMSE) y una nota explicativa sobre por qué no se predice la tasa de aperturas
+8. **Chatbot flotante** — widget abajo a la derecha, con preguntas sugeridas e indicador de escritura
 
 ---
 
@@ -351,6 +380,7 @@ Documentación interactiva disponible en `http://localhost:8000/docs`.
 | Formato intermedio | Parquet | Mucho más compacto que CSV, lectura rápida |
 | API | FastAPI | Tipado, documentación automática, async nativo |
 | LLM | Groq (GPT-OSS 120B + Llama 3.3 como respaldo) | Gratuito, rápido, function calling nativo |
+| Modelo de predicción | scikit-learn (RandomForestRegressor) | Robusto con poco dato, no requiere escalado, fácil de evaluar y comparar modelos |
 | Frontend | React + Vite | HMR rápido, ecosistema maduro |
 | Gráficos | Recharts | Declarativo, liviano, suficiente para el caso |
 | Estilos | CSS con variables | Sin dependencias, control total |
