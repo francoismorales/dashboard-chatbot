@@ -42,6 +42,19 @@ async def lifespan(app: FastAPI):
     with open(PROCESSED_DIR / "summary.json", "r", encoding="utf-8") as f:
         DATA["summary"] = json.load(f)
 
+    # Cargar forecast y métricas si existen (puede no haberse entrenado aún)
+    forecast_path = PROCESSED_DIR / "forecast.parquet"
+    model_info_path = PROCESSED_DIR / "model_info.json"
+    if forecast_path.exists() and model_info_path.exists():
+        DATA["forecast"] = pd.read_parquet(forecast_path)
+        with open(model_info_path, "r", encoding="utf-8") as f:
+            DATA["model_info"] = json.load(f)
+        print(f"  ✔ forecast:  {len(DATA['forecast']):,} horas futuras cargadas")
+    else:
+        DATA["forecast"] = None
+        DATA["model_info"] = None
+        print("  ⚠  forecast no disponible (corre ingest.py primero)")
+
     print(f"  ✔ raw:       {len(DATA['raw']):,} filas")
     print(f"  ✔ by_minute: {len(DATA['by_minute']):,} filas")
     print(f"  ✔ by_hour:   {len(DATA['by_hour']):,} filas")
@@ -257,6 +270,37 @@ def get_anomalies(sigma: float = Query(3.0, ge=1.0, le=6.0), top_n: int = Query(
     }
 
 
+@app.get("/api/forecast")
+def get_forecast():
+    """
+    Predicción horaria de los próximos 7 días para aperturas y cierres.
+    Incluye banda de confianza 95% (±1.96 × desviación de residuos).
+    """
+    if DATA.get("forecast") is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Forecast no disponible. Corre `python ingest.py` para entrenar el modelo."
+        )
+
+    df = DATA["forecast"].copy()
+    # Los timestamps están guardados como string en el parquet
+    return {
+        "count": len(df),
+        "data": df.to_dict(orient="records"),
+    }
+
+
+@app.get("/api/model-info")
+def get_model_info():
+    """Métricas de evaluación del modelo (MAE, RMSE, R², MAPE, feature importance)."""
+    if DATA.get("model_info") is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Modelo no entrenado. Corre `python ingest.py`."
+        )
+    return DATA["model_info"]
+
+
 # =============================================================================
 # CHATBOT ENDPOINT
 # =============================================================================
@@ -286,6 +330,8 @@ def post_chat(req: ChatRequest):
             conversation_history=history,
             df=DATA["raw"],
             summary=DATA["summary"],
+            forecast_df=DATA.get("forecast"),
+            model_info=DATA.get("model_info"),
         )
     except RuntimeError as e:
         # Falta API key u otro problema de config

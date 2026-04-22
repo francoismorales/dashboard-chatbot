@@ -1,0 +1,61 @@
+{
+  "trained_on": {
+    "start": "2026-02-01 06:00:00-05:00",
+    "end": "2026-02-11 15:00:00-05:00",
+    "n_hours": 200
+  },
+  "forecast": {
+    "start": "2026-02-11 15:00:00-05:00",
+    "end": "2026-02-18 14:00:00-05:00",
+    "n_hours": 168,
+    "days_ahead": 7
+  },
+  "metrics_up": {
+    "mae": 38.008,
+    "rmse": 100.62,
+    "r2": 0.254,
+    "mape_percent": 37.67,
+    "residual_std": 97.35,
+    "n_train": 156,
+    "n_test": 20,
+    "feature_importance": {
+      "hour": 0.038,
+      "day_of_week": 0.015,
+      "is_weekend": 0.001,
+      "hour_sin": 0.032,
+      "hour_cos": 0.804,
+      "dow_sin": 0.012,
+      "dow_cos": 0.005,
+      "rate_up_lag_24h": 0.041,
+      "rate_up_rolling_24h": 0.052
+    },
+    "target_mean_actual": 90.422
+  },
+  "metrics_down": {
+    "mae": 74.603,
+    "rmse": 173.115,
+    "r2": 0.9458,
+    "mape_percent": 51.85,
+    "residual_std": 158.121,
+    "n_train": 156,
+    "n_test": 20,
+    "feature_importance": {
+      "hour": 0.506,
+      "day_of_week": 0.023,
+      "is_weekend": 0.003,
+      "hour_sin": 0.0,
+      "hour_cos": 0.398,
+      "dow_sin": 0.044,
+      "dow_cos": 0.005,
+      "rate_down_lag_24h": 0.005,
+      "rate_down_rolling_24h": 0.014
+    },
+    "target_mean_actual": 235.912
+  },
+  "model_type": "RandomForestRegressor",
+  "model_params": {
+    "n_estimators": 200,
+    "max_depth": 8,
+    "min_samples_leaf": 2
+  }
+}

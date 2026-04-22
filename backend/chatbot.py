@@ -310,6 +310,121 @@ def tool_get_date_range_stats(df: pd.DataFrame, start_date: str, end_date: str) 
     }
 
 
+def tool_get_forecast_summary(
+    df: pd.DataFrame, forecast_df, model_info: dict
+) -> dict:
+    """
+    Resumen del forecast de los próximos 7 días + métricas del modelo.
+    Responde a preguntas como '¿qué espera el modelo para la próxima semana?'
+    o '¿qué tan bueno es el modelo?'.
+    """
+    if forecast_df is None or model_info is None:
+        return {"error": "El modelo de predicción no está disponible. Corre ingest.py."}
+
+    fc = forecast_df.copy()
+    # Los timestamps están guardados como string en el parquet
+    fc["timestamp_dt"] = pd.to_datetime(fc["timestamp"])
+    fc["day"] = fc["timestamp_dt"].dt.date.astype(str)
+
+    # Agregado diario: pico máximo, promedio y suma esperada por día
+    daily = (
+        fc.groupby("day")
+        .agg(
+            cierres_promedio_s=("pred_down", "mean"),
+            pico_cierres_s=("pred_down", "max"),
+            hora_pico=("pred_down", "idxmax"),
+        )
+        .reset_index()
+    )
+    daily["hora_pico"] = daily["hora_pico"].map(
+        lambda i: str(fc.loc[i, "timestamp_dt"].strftime("%H:%M"))
+    )
+
+    m = model_info["metrics_down"]
+
+    return {
+        "periodo_forecast": {
+            "inicio": str(fc["timestamp_dt"].min()),
+            "fin": str(fc["timestamp_dt"].max()),
+            "horas_predichas": int(len(fc)),
+        },
+        "calidad_modelo": {
+            "r2": round(m["r2"], 3),
+            "mae_cierres_s": round(m["mae"], 2),
+            "rmse": round(m["rmse"], 2),
+            "interpretacion": (
+                "Excelente" if m["r2"] >= 0.8 else
+                "Bueno" if m["r2"] >= 0.6 else
+                "Aceptable" if m["r2"] >= 0.4 else
+                "Débil"
+            ),
+        },
+        "nota_importante": "El modelo solo predice CIERRES. El modelo de aperturas fue descartado por baja calidad predictiva (R²<0.3).",
+        "resumen_diario": [
+            {
+                "dia": row["day"],
+                "cierres_promedio_s": round(row["cierres_promedio_s"], 1),
+                "pico_cierres_s": round(row["pico_cierres_s"], 1),
+                "hora_del_pico": row["hora_pico"],
+            }
+            for _, row in daily.iterrows()
+        ],
+    }
+
+
+def tool_get_forecast_for_date(
+    df: pd.DataFrame, forecast_df, model_info: dict, target_date: str
+) -> dict:
+    """
+    Predicción detallada para una fecha futura específica (formato YYYY-MM-DD).
+    Responde a '¿qué va a pasar el lunes de la próxima semana?' o
+    '¿cuándo va a ser el pico de cierres el 2026-02-15?'.
+    """
+    if forecast_df is None or model_info is None:
+        return {"error": "El modelo de predicción no está disponible."}
+
+    try:
+        target = pd.to_datetime(target_date).date()
+    except Exception:
+        return {"error": f"Fecha inválida: '{target_date}'. Usa formato YYYY-MM-DD."}
+
+    fc = forecast_df.copy()
+    fc["timestamp_dt"] = pd.to_datetime(fc["timestamp"])
+    fc["date"] = fc["timestamp_dt"].dt.date
+
+    day_data = fc[fc["date"] == target]
+
+    if len(day_data) == 0:
+        avail_dates = sorted(fc["date"].unique())
+        return {
+            "error": f"No hay predicción para {target_date}.",
+            "fechas_disponibles": f"{avail_dates[0]} a {avail_dates[-1]}",
+        }
+
+    # Hora pico del día
+    peak_idx = day_data["pred_down"].idxmax()
+    peak_row = day_data.loc[peak_idx]
+
+    return {
+        "fecha": str(target),
+        "cierres_promedio_s": round(float(day_data["pred_down"].mean()), 1),
+        "cierres_total_dia_s": round(float(day_data["pred_down"].sum()), 1),
+        "pico_cierres_s": round(float(peak_row["pred_down"]), 1),
+        "hora_del_pico": str(peak_row["timestamp_dt"].strftime("%H:%M")),
+        "banda_pico_minima": round(float(peak_row["pred_down_low"]), 1),
+        "banda_pico_maxima": round(float(peak_row["pred_down_high"]), 1),
+        "por_hora": [
+            {
+                "hora": str(pd.to_datetime(row["timestamp"]).strftime("%H:%M")),
+                "cierres_s": round(float(row["pred_down"]), 1),
+                "banda_min": round(float(row["pred_down_low"]), 1),
+                "banda_max": round(float(row["pred_down_high"]), 1),
+            }
+            for _, row in day_data.iterrows()
+        ],
+    }
+
+
 # =============================================================================
 # ESQUEMA DE TOOLS para el LLM (formato OpenAI/Groq)
 # =============================================================================
@@ -412,6 +527,28 @@ TOOLS_SPEC = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_forecast_summary",
+            "description": "Resumen de la predicción del modelo para los próximos 7 días + métricas de calidad del modelo (R², MAE, RMSE). ÚSALO cuando el usuario pregunte sobre 'la predicción', 'el pronóstico', 'la próxima semana', 'qué espera el modelo', 'qué tan bueno es el modelo'. IMPORTANTE: el modelo SOLO predice cierres; si preguntan por aperturas futuras, aclara que ese modelo no está disponible por baja calidad predictiva.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_forecast_for_date",
+            "description": "Predicción detallada de cierres hora por hora para una fecha FUTURA específica. Úsalo para '¿qué predice el modelo para el lunes?', '¿cuándo será el pico de cierres el 2026-02-15?', 'cuántos cierres espera el modelo el próximo sábado'. Solo funciona con fechas dentro del rango del forecast (próximos 7 días).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_date": {"type": "string", "description": "Fecha futura en formato YYYY-MM-DD"},
+                },
+                "required": ["target_date"],
+            },
+        },
+    },
 ]
 
 TOOL_DISPATCHER = {
@@ -422,17 +559,38 @@ TOOL_DISPATCHER = {
     "compare_two_periods": tool_compare_two_periods,
     "rank_by_dimension": tool_rank_by_dimension,
     "get_date_range_stats": tool_get_date_range_stats,
+    "get_forecast_summary": tool_get_forecast_summary,
+    "get_forecast_for_date": tool_get_forecast_for_date,
 }
+
+# Tools que requieren forecast_df y model_info además de df
+TOOLS_REQUIRING_FORECAST = {"get_forecast_summary", "get_forecast_for_date"}
 
 
 # =============================================================================
 # SYSTEM PROMPT
 # =============================================================================
 
-def build_system_prompt(summary: dict) -> str:
+def build_system_prompt(summary: dict, has_forecast: bool = False) -> str:
     """Construye el system prompt con el contexto actual del dataset."""
     m = list(summary["metrics"].values())[0]
     p = summary["period"]
+
+    forecast_section = ""
+    if has_forecast:
+        forecast_section = """
+
+PREDICCIÓN (FORECAST):
+El dashboard incluye un modelo de Machine Learning que predice los CIERRES de los
+próximos 7 días (hora por hora). Importante:
+- Solo hay predicción de CIERRES, no de aperturas (el modelo de aperturas fue
+  descartado por baja calidad predictiva — R² < 0.3).
+- Si el usuario pregunta sobre la predicción usa `get_forecast_summary` para resumen
+  general o `get_forecast_for_date` para una fecha específica futura.
+- Si preguntan sobre aperturas futuras, explica que ese modelo no existe en el dashboard
+  por decisión consciente: las aperturas tienen picos extraordinarios que no pueden
+  predecirse solo con features calendario.
+- El modelo reporta calidad con R² (0-1, más alto mejor) y MAE en cierres/s."""
 
     return f"""Eres un asistente analítico del dashboard de monitoreo de tiendas de Rappi.
 
@@ -464,7 +622,7 @@ INTERPRETACIÓN OPERACIONAL:
 - Aumentos en el contador = tiendas que pasaron a responder "visible"
 - Disminuciones = tiendas que dejaron de responder "visible"
 - Picos extremos coinciden con momentos de cambio de estado masivo (cierres/aperturas
-  comerciales coordinadas).
+  comerciales coordinadas).{forecast_section}
 
 REGLAS:
 1. Para CUALQUIER número específico, SIEMPRE usa las tools. Nunca inventes cifras.
@@ -484,6 +642,8 @@ GUÍA PARA ELEGIR TOOLS:
 - "cuándo hubo más / top / ranking de aperturas o cierres" → `find_extreme_events`
 - "compara X con Y" → `compare_two_periods`
 - "resumen general / qué tenemos" → `get_overview`
+- "predicción / pronóstico / próxima semana / qué espera el modelo" → `get_forecast_summary`
+- "predicción para el [día/fecha futura]" → `get_forecast_for_date`
 
 Si una pregunta es ambigua, pide aclaración antes de invocar una tool."""
 
@@ -497,6 +657,8 @@ def chat(
     conversation_history: list,
     df: pd.DataFrame,
     summary: dict,
+    forecast_df=None,
+    model_info: dict = None,
     model: str = "openai/gpt-oss-120b",
     max_iterations: int = 5,
 ) -> dict:
@@ -510,9 +672,12 @@ def chat(
     4. Loop hasta max_iterations (safety)
 
     Si el modelo primario falla (tool_use_failed), intenta con fallback.
+
+    forecast_df y model_info son opcionales: si se proveen, las tools
+    de forecast pueden invocarse. Si no, el LLM recibe error si intenta usarlas.
     """
     client = _get_client()
-    system_prompt = build_system_prompt(summary)
+    system_prompt = build_system_prompt(summary, has_forecast=forecast_df is not None)
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(conversation_history)
@@ -525,22 +690,21 @@ def chat(
     for current_model in models_to_try:
         try:
             return _run_agent_loop(
-                client, current_model, messages, tool_calls_log, df, max_iterations
+                client, current_model, messages, tool_calls_log,
+                df, forecast_df, model_info, max_iterations
             )
         except Exception as e:
             last_error = e
             err_str = str(e).lower()
-            # Si es tool_use_failed o similar, intenta con el siguiente modelo
             if "tool_use_failed" in err_str or "invalid_request" in err_str:
                 tool_calls_log.append({"name": "__model_fallback__", "from": current_model})
                 continue
-            # Otros errores (red, rate limit) no vale la pena reintentar con otro modelo
             raise
 
     raise last_error or RuntimeError("Todos los modelos fallaron")
 
 
-def _run_agent_loop(client, model, messages, tool_calls_log, df, max_iterations):
+def _run_agent_loop(client, model, messages, tool_calls_log, df, forecast_df, model_info, max_iterations):
     """Loop interno de tool use. Separado para permitir reintento con otro modelo."""
     for iteration in range(max_iterations):
         response = client.chat.completions.create(
@@ -555,7 +719,6 @@ def _run_agent_loop(client, model, messages, tool_calls_log, df, max_iterations)
         msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
 
-        # Si no hay tool_calls, terminamos
         if not msg.tool_calls:
             return {
                 "response": msg.content,
@@ -578,7 +741,11 @@ def _run_agent_loop(client, model, messages, tool_calls_log, df, max_iterations)
                 result = {"error": f"Tool '{fn_name}' no existe"}
             else:
                 try:
-                    result = TOOL_DISPATCHER[fn_name](df, **fn_args)
+                    # Las tools de forecast reciben forecast_df + model_info además de df
+                    if fn_name in TOOLS_REQUIRING_FORECAST:
+                        result = TOOL_DISPATCHER[fn_name](df, forecast_df, model_info, **fn_args)
+                    else:
+                        result = TOOL_DISPATCHER[fn_name](df, **fn_args)
                 except Exception as e:
                     result = {"error": f"Error ejecutando {fn_name}: {str(e)}"}
 

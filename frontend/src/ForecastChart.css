@@ -1,0 +1,238 @@
+/* src/ForecastChart.css
+ * Diseño distintivo: fondo sutil con patrón, borde punteado para transmitir
+ * "predicción / futuro / incertidumbre" vs los paneles sólidos del histórico.
+ */
+
+.fc-panel {
+  background: linear-gradient(135deg, #FFFFFF 0%, #FAFAF5 100%);
+  border: 1px solid #EAE7E3;
+  border-top: 3px solid #FF441F;
+  border-radius: 12px;
+  padding: 0;
+  margin-bottom: 20px;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(14,11,8,0.06);
+  position: relative;
+}
+
+/* Watermark de fondo sutil */
+.fc-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle at 20% 30%, rgba(255, 68, 31, 0.02) 0%, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(31, 111, 255, 0.02) 0%, transparent 40%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.fc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #EAE7E3;
+  position: relative;
+  z-index: 1;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.fc-header h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.fc-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: #5A5550;
+  line-height: 1.5;
+}
+.fc-subtitle strong { color: #0E0B08; }
+
+/* Switch de vistas */
+.fc-view-switch {
+  display: flex;
+  gap: 4px;
+  background: #F7F5F1;
+  border-radius: 8px;
+  padding: 3px;
+}
+.fc-view-switch button {
+  border: none;
+  background: transparent;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #5A5550;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s;
+}
+.fc-view-switch button:hover { color: #0E0B08; }
+.fc-view-switch button.active {
+  background: white;
+  color: #FF441F;
+  box-shadow: 0 1px 3px rgba(14,11,8,0.1);
+  font-weight: 600;
+}
+
+/* ---- Métricas del modelo ---- */
+.fc-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: #EAE7E3;
+  position: relative;
+  z-index: 1;
+}
+.fc-metric {
+  background: white;
+  padding: 14px 18px;
+}
+.fc-metric-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8A8680;
+  margin-bottom: 6px;
+}
+.fc-metric-value {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+.fc-metric-hint {
+  font-size: 11px;
+  color: #5A5550;
+  margin-top: 2px;
+  font-family: ui-monospace, monospace;
+}
+
+/* ---- Chart ---- */
+.fc-chart-wrap {
+  padding: 20px 10px 4px;
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- Footer con interpretación ---- */
+.fc-footer {
+  padding: 16px 24px 20px;
+  border-top: 1px solid #EAE7E3;
+  background: #FAFAF5;
+  position: relative;
+  z-index: 1;
+}
+.fc-footer > div:first-child {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #5A5550;
+  padding-bottom: 12px;
+}
+.fc-note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #5A5550;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #FFF9E6;
+  border-left: 3px solid #F59E0B;
+  border-radius: 4px;
+}
+.fc-footer strong { color: #0E0B08; }
+
+.fc-technical {
+  margin-top: 8px;
+}
+.fc-technical summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #5A5550;
+  font-weight: 500;
+  padding: 6px 0;
+  user-select: none;
+}
+.fc-technical summary:hover { color: #FF441F; }
+
+.fc-technical-content {
+  padding: 14px 16px;
+  margin-top: 8px;
+  background: white;
+  border: 1px solid #EAE7E3;
+  border-radius: 8px;
+  font-size: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.fc-technical-content > div:last-child { grid-column: 1 / -1; }
+.fc-technical-content ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  list-style: none;
+}
+.fc-technical-content li {
+  padding: 2px 0;
+  color: #5A5550;
+}
+.fc-technical-content li strong { color: #0E0B08; }
+
+/* Barras de feature importance */
+.fc-features { margin-top: 4px; }
+.fc-bars {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fc-bar {
+  display: grid;
+  grid-template-columns: 90px 1fr 50px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.fc-bar-label {
+  font-family: ui-monospace, monospace;
+  color: #5A5550;
+}
+.fc-bar-track {
+  background: #F7F5F1;
+  border-radius: 3px;
+  height: 10px;
+  overflow: hidden;
+}
+.fc-bar-fill {
+  background: linear-gradient(90deg, #FF441F, #FF6A1F);
+  height: 100%;
+  border-radius: 3px;
+}
+.fc-bar-value {
+  font-family: ui-monospace, monospace;
+  color: #0E0B08;
+  font-weight: 600;
+  text-align: right;
+}
+
+/* ---- Estados ---- */
+.fc-loading, .fc-error {
+  padding: 40px 20px;
+  text-align: center;
+  color: #5A5550;
+  background: white;
+  border: 1px solid #EAE7E3;
+  border-radius: 12px;
+  margin-bottom: 20px;
+}
+.fc-error { color: #B00020; }
+
+/* ---- Responsive ---- */
+@media (max-width: 900px) {
+  .fc-metrics { grid-template-columns: repeat(2, 1fr); }
+  .fc-technical-content { grid-template-columns: 1fr; }
+  .fc-header { flex-direction: column; }
+}

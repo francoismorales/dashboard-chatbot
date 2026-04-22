@@ -6,6 +6,7 @@ import {
 } from "recharts";
 import { api } from "./api";
 import ChatBot from "./ChatBot";
+import ForecastChart from "./ForecastChart";
 import "./App.css";
 
 // Paleta: rojo-Rappi para aperturas, azul para cierres
@@ -440,8 +441,11 @@ export default function App() {
         )}
       </Section>
 
+      {/* -------- Predicción 7 días -------- */}
+      <ForecastChart />
+
       <footer className="foot">
-        Construido con FastAPI + React · métrica bidireccional: aperturas vs cierres
+        Construido por Francois Morales
       </footer>
 
       <ChatBot />

@@ -228,6 +228,16 @@ def main() -> None:
 
     print(f"💾 Agregados por minuto y hora guardados.")
     print(f"💾 Summary JSON guardado en {OUT_DIR / 'summary.json'}")
+
+    # ---- Entrenar modelo de predicción ----
+    try:
+        from model import train_and_save
+        train_and_save(df, OUT_DIR)
+    except ImportError:
+        print("\n⚠️  model.py no encontrado, saltando entrenamiento. Instala scikit-learn: pip install scikit-learn")
+    except Exception as e:
+        print(f"\n⚠️  Error entrenando modelo: {e}")
+
     print("\n✅ Ingesta completa.")
 
 

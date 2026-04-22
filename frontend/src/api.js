@@ -32,4 +32,8 @@ export const api = {
 
   anomalies: ({ sigma = 3, topN = 15 } = {}) =>
     fetchJSON(`/api/anomalies?sigma=${sigma}&top_n=${topN}`),
+
+  forecast: () => fetchJSON("/api/forecast"),
+
+  modelInfo: () => fetchJSON("/api/model-info"),
 };
