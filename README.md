@@ -54,7 +54,8 @@ rappi-dashboard/
 │   ├── ingest.py              # script de ingesta (correr una vez)
 │   ├── main.py                # API FastAPI
 │   ├── chatbot.py             # agente conversacional
-│   ├── .env                   # GROQ_API_KEY (NO commitear)
+│   ├── model.py               # modelo para la predicción de cierres de tiendas
+│   ├── .env                   # GROQ_API_KEY 
 │   └── .env.example           # plantilla
 ├── frontend/
 │   ├── src/
@@ -63,6 +64,8 @@ rappi-dashboard/
 │   │   ├── ChatBot.jsx        # widget flotante del chat
 │   │   ├── ChatBot.css
 │   │   ├── api.js             # capa única de llamadas al backend
+│   │   ├── ForecastChart.jsx
+│   │   ├── ForecastChart.css
 │   │   └── index.css
 │   └── package.json
 └── data/
@@ -290,35 +293,22 @@ La inteligencia artificial se usó en dos dimensiones distintas del proyecto: **
 
 ### Cómo se usó la IA durante el desarrollo
 
-El enfoque fue **iterativo y dialogado**, no generativo. En cada fase del proyecto seguí un ciclo: definir el problema → discutir enfoques con la IA → elegir una dirección con razones → implementar → validar resultado → ajustar.
-
-Ejemplos concretos:
-
-- **Ingesta de datos**: antes de escribir código, discutí con la IA cómo tratar el formato wide de los CSVs y qué estructura intermedia (Parquet) convenía para que el backend fuera rápido. La IA propuso varias opciones; elegí `pd.melt` + Parquet porque es estándar y portable.
-
-- **Interpretación de la métrica**: al notar inconsistencias entre los datos y el enunciado (valores demasiado altos para ser tiendas individuales), usé la IA como interlocutor para validar hipótesis. Esto llevó a reinterpretar la métrica como "chequeos de monitoreo", decisión que después se reflejó en el lenguaje del dashboard y del chatbot.
-
-- **Arquitectura del chatbot**: la pregunta clave fue *"¿RAG o function calling?"*. Discutí los trade-offs con la IA: RAG funciona bien para texto pero no para datos numéricos tabulares, donde function calling permite cálculos exactos y elimina alucinaciones. La decisión se tomó con criterio propio después del análisis.
-
-- **Selección del proveedor LLM**: evalué Anthropic, OpenAI y Groq comparando costo, velocidad, soporte de function calling y barrera de entrada. Groq ganó por combinar plan gratuito generoso, hardware LPU (inferencia 3–10× más rápida que GPU tradicional) y compatibilidad completa con el paradigma de tool use.
-
-- **Depuración a lo largo del proyecto**: usé la IA como copiloto de *debugging* en todas las capas de la aplicación —ingesta, endpoints del backend, componentes del frontend y lógica del chatbot—. Cuando aparecía un comportamiento inesperado, describía el síntoma, analizábamos posibles causas y yo validaba cuál aplicaba antes de ajustar el código. Este ciclo aceleró muchísimo la resolución de problemas sin convertir a la IA en autora única del código.
+El enfoque fue **iterativo y dialogado**, no generativo. En cada fase del proyecto seguí un ciclo: definir el problema → discutir enfoques con la IA → elegir una dirección con razones → implementar con la ayuda de IA → validar resultado → ajustar.
 
 ### Por qué esta aproximación
 
-El enunciado de la prueba enfatiza: *"Queremos ver cómo piensan, no solo qué entregan. Si no entienden lo que construyeron, no cuenta."* El uso de IA como copiloto amplifica la productividad, pero cada decisión de arquitectura, cada elección de biblioteca y cada criterio analítico se discutió y se entendió antes de implementarse. El código entregado no es código generado a ciegas: es código decidido con criterio propio y escrito con asistencia.
+El uso de IA como copiloto amplifica la productividad, pero cada decisión de arquitectura, cada elección de biblioteca y cada criterio analítico se discutió y se entendió antes de implementarse. El código entregado no es código generado a ciegas: es código decidido con criterio propio y escrito con asistencia.
 
 ### El LLM dentro de la aplicación: Groq con function calling
 
 El chatbot usa Groq como proveedor de LLM. Groq ejecuta modelos open-source (GPT-OSS 120B como primario, Llama 3.3 70B como respaldo) sobre hardware especializado (LPU) que logra latencias de ~1 segundo por respuesta, notablemente más rápido que proveedores basados en GPU.
 
-La arquitectura es **function calling** (también llamado tool use): el LLM no accede directamente a los datos, sino que invoca funciones Python que se ejecutan sobre los DataFrames de pandas. Esto entrega tres beneficios:
+La arquitectura es **function calling** (tool use): el LLM no accede directamente a los datos, sino que invoca funciones Python que se ejecutan sobre los DataFrames de pandas. Esto entrega tres beneficios:
 
 1. **Precisión numérica garantizada** — cada cifra proviene de un cálculo determinístico sobre los datos, no de una estimación del modelo.
 2. **Seguridad** — el modelo nunca ejecuta código arbitrario; solo puede invocar las funciones que se le exponen explícitamente.
 3. **Trazabilidad** — cada respuesta registra qué función se invocó y con qué argumentos, visible en la interfaz.
 
-La elección entre Anthropic, OpenAI y Groq se tomó considerando que (1) el proyecto requiere acceso gratuito durante desarrollo y demostración, (2) la latencia es crítica en un chatbot interactivo, y (3) el modelo debe soportar function calling de forma fiable. Groq fue el único que cumplía los tres criterios sin fricción.
 
 ---
 
