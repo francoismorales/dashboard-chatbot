@@ -1,13 +1,4 @@
-"""
-Backend FastAPI para el dashboard de disponibilidad de tiendas Rappi.
 
-Interpretación de la métrica synthetic_monitoring_visible_stores:
-    rate_per_sec = cambio neto de tiendas visibles por segundo
-    rate_up (positivo) = aperturas netas
-    rate_down (negativo en rate_per_sec, absoluto en rate_down) = cierres netos
-
-El dashboard muestra ambos signos para revelar el ritmo bidireccional del negocio.
-"""
 
 import json
 import math
@@ -102,6 +93,24 @@ def _localize(ts_series):
         ts_series = ts_series.dt.tz_localize("UTC")
     return ts_series.dt.tz_convert("America/Bogota")
 
+def _mark_suspicious(picos: pd.DataFrame, contrapartes: pd.DataFrame) -> pd.DataFrame:
+    """Marca picos que tienen un pico opuesto dentro de ±5 min."""
+    if len(picos) == 0:
+        picos = picos.copy()
+        picos["is_suspicious"] = False
+        return picos
+
+    ts_contra = contrapartes["timestamp"].reset_index(drop=True)
+    delta_min = pd.Timedelta(minutes=5)
+
+    suspicious = []
+    for ts in picos["timestamp"]:
+        close = ((ts_contra >= (ts - delta_min)) & (ts_contra <= (ts + delta_min))).any()
+        suspicious.append(bool(close))
+
+    picos = picos.copy()
+    picos["is_suspicious"] = suspicious
+    return picos
 
 # ----------------- Endpoints -----------------
 @app.get("/")
@@ -121,7 +130,7 @@ def get_timeseries(
     end: Optional[str] = None,
     granularity: str = Query("auto", pattern="^(auto|minute|hour)$"),
 ):
-    """Serie temporal bidireccional: rate_up (aperturas) y rate_down (cierres)."""
+    """Serie temporal del flujo neto de tiendas visibles."""
     if granularity == "auto":
         df = _filter_range(DATA["by_minute"], start, end)
         if len(df) > 3000:
@@ -147,40 +156,37 @@ def get_timeseries(
 
 @app.get("/api/peaks")
 def get_peaks(top_n: int = Query(10, ge=1, le=50)):
-    """Top picos de apertura y de cierre, por separado."""
-    df = DATA["raw"].dropna(subset=["rate_per_sec"])
+    """Top picos de flujo neto."""
+    df = DATA["raw"].dropna(subset=["net_flow"])
 
-    top_up = df[df["rate_per_sec"] > 0].nlargest(top_n, "rate_per_sec")
-    top_up = top_up[["timestamp", "value", "rate_per_sec"]].copy()
+    top_growth = (df[df["net_flow"] > 0].nlargest(top_n, "net_flow")[["timestamp", "value", "net_flow"]])
+    top_attrition = (df[df["net_flow"] < 0].nsmallest(top_n, "net_flow")[["timestamp", "value", "net_flow"]].copy())
+    top_growth = _mark_suspicious(top_growth, top_attrition)
+    top_attrition = _mark_suspicious(top_attrition, top_growth)
 
-    top_down = df[df["rate_per_sec"] < 0].nsmallest(top_n, "rate_per_sec")
-    top_down = top_down[["timestamp", "value", "rate_per_sec"]].copy()
-    top_down["rate_per_sec"] = top_down["rate_per_sec"].abs()
+    cols = ["timestamp", "value", "net_flow", "is_suspicious"]
 
     return {
-        "top_up": _df_to_records(top_up),
-        "top_down": _df_to_records(top_down),
+        "top_growth":    _df_to_records(top_growth[cols]),
+        "top_attrition": _df_to_records(top_attrition[cols]),
     }
 
 
 @app.get("/api/hourly-pattern")
 def get_hourly_pattern():
-    """Promedio de aperturas y cierres por hora del día (0-23)."""
-    df = DATA["raw"].copy().dropna(subset=["rate_per_sec"])
+    """Flujo neto promedio por hora del día (0-23)."""
+    df = DATA["raw"].copy().dropna(subset=["net_flow"])
     df["hour"] = _localize(df["timestamp"]).dt.hour
 
     result = []
     for hour in range(24):
         h = df[df["hour"] == hour]
         if len(h) == 0:
-            result.append({"hour": hour, "avg_up": 0, "avg_down": 0, "n_samples": 0})
+            result.append({"hour": hour, "avg_net_flow": 0, "n_samples": 0})
             continue
-        ups = h.loc[h["rate_per_sec"] > 0, "rate_per_sec"]
-        downs = h.loc[h["rate_per_sec"] < 0, "rate_per_sec"].abs()
         result.append({
             "hour": hour,
-            "avg_up": round(float(ups.mean()) if len(ups) else 0, 2),
-            "avg_down": round(float(downs.mean()) if len(downs) else 0, 2),
+            "avg_net_flow": round(float(h["net_flow"].mean()), 2),
             "n_samples": int(len(h)),
         })
     return {"data": result}
@@ -188,9 +194,9 @@ def get_hourly_pattern():
 
 @app.get("/api/daily-pattern")
 def get_daily_pattern():
-    """Promedio de aperturas y cierres por día de la semana."""
+    """Flujo neto por día de la semana."""
     days_es = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
-    df = DATA["raw"].copy().dropna(subset=["rate_per_sec"])
+    df = DATA["raw"].copy().dropna(subset=["net_flow"])
     ts = _localize(df["timestamp"])
     df["dow_num"] = ts.dt.dayofweek
 
@@ -199,16 +205,36 @@ def get_daily_pattern():
         d = df[df["dow_num"] == dow]
         if len(d) == 0:
             continue
-        ups = d.loc[d["rate_per_sec"] > 0, "rate_per_sec"]
-        downs = d.loc[d["rate_per_sec"] < 0, "rate_per_sec"].abs()
         result.append({
             "dow_num": dow,
             "day": days_es[dow],
-            "avg_up": round(float(ups.mean()) if len(ups) else 0, 2),
-            "avg_down": round(float(downs.mean()) if len(downs) else 0, 2),
+            "avg_net_flow": round(float(d["net_flow"].mean()), 2),
         })
     return {"data": result}
 
+@app.get("/api/by-date")
+def get_by_date():
+    """
+    Balance diario del flujo neto por fecha calendario.
+    Devuelve una entrada por cada día con datos: fecha, flujo neto promedio.
+    """
+    df = DATA["raw"].copy().dropna(subset=["net_flow"])
+    ts = _localize(df["timestamp"])
+    df["date"] = ts.dt.date
+
+    result = []
+    for date, day in df.groupby("date"):
+        flow = day["net_flow"]
+        result.append({
+            "date": date.isoformat(),
+            "label": date.strftime("%d %b"),  # "01 feb"
+            "avg_net_flow": round(float(flow.mean()), 2),
+            "sum_growth": round(float(flow[flow > 0].sum()), 2),
+            "sum_attrition": round(float(flow[flow < 0].sum()), 2),  # negativo
+            "value_peak": float(day["value"].max()),
+            "n_samples": int(len(day)),
+        })
+    return {"data": result}
 
 @app.get("/api/heatmap")
 def get_heatmap():
@@ -217,19 +243,18 @@ def get_heatmap():
     Rojo cuando dominan aperturas, azul cuando dominan cierres.
     """
     days_es = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
-    df = DATA["raw"].copy().dropna(subset=["rate_per_sec"])
+    df = DATA["raw"].copy().dropna(subset=["net_flow"])
     ts = _localize(df["timestamp"])
     df["dow_num"] = ts.dt.dayofweek
     df["hour"] = ts.dt.hour
 
     pivot = (
-        df.groupby(["dow_num", "hour"])["rate_per_sec"]
+        df.groupby(["dow_num", "hour"])["net_flow"]
         .mean().round(2).reset_index()
     )
-    pivot.rename(columns={"rate_per_sec": "net_flow"}, inplace=True)
     pivot["day"] = pivot["dow_num"].map(days_es)
-
-    abs_max = float(pivot["net_flow"].abs().max()) if len(pivot) else 0
+    abs_values = pivot["net_flow"].abs()
+    abs_max = float(abs_values.quantile(0.95)) if len(abs_values) else 0
 
     return {
         "data": pivot.to_dict(orient="records"),
@@ -240,32 +265,48 @@ def get_heatmap():
 
 
 @app.get("/api/anomalies")
-def get_anomalies(sigma: float = Query(3.0, ge=1.0, le=6.0), top_n: int = Query(15, ge=1, le=50)):
+def get_anomalies(threshold: float = Query(6.0, ge=1.0, le=12.0), top_n: int = Query(15, ge=1, le=50), hour: Optional[int] = Query(None, ge=0, le=23), dow: Optional[int] = Query(None, ge=0, le=6),):
     """
-    Anomalías en ambos sentidos (apertura y cierre).
-    Z-score calculado contra el promedio de cada hora del día.
+    Anomalías del flujo neto detectadas con z-score
     """
-    df = DATA["raw"].copy().dropna(subset=["rate_per_sec"])
+    df = DATA["raw"].copy().dropna(subset=["net_flow"])
     ts = _localize(df["timestamp"])
     df["hour"] = ts.dt.hour
+    df["dow_num"] = ts.dt.dayofweek
 
-    stats = df.groupby("hour")["rate_per_sec"].agg(hourly_mean="mean", hourly_std="std").reset_index()
-    df = df.merge(stats, on="hour")
-    df["z_score"] = (df["rate_per_sec"] - df["hourly_mean"]) / df["hourly_std"].replace(0, np.nan)
-    df["is_anomaly"] = df["z_score"].abs() > sigma
-    df["direction"] = np.where(df["z_score"] >= 0, "up", "down")
+    days_es = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
+    df["dow"] = df["dow_num"].map(days_es)
+
+    grouped = df.groupby("hour")["net_flow"]
+    df["hour_median"] = grouped.transform("median")
+    df["hour_mad"] = grouped.transform(lambda s: (s - s.median()).abs().median())
+    df["z_robust"] = (df["net_flow"] - df["hour_median"]) / (1.4826 * df["hour_mad"]).replace(0, np.nan)
+    df["is_anomaly"] = df["z_robust"].abs() > threshold
+    df["direction"] = np.where(df["z_robust"] >= 0, "growth_spike", "attrition_spike")
 
     count = int(df["is_anomaly"].sum())
     anomalies = df[df["is_anomaly"]].copy()
-    anomalies = anomalies.reindex(anomalies["z_score"].abs().sort_values(ascending=False).index)
-    anomalies = anomalies.head(top_n)
-    anomalies = anomalies[["timestamp", "value", "rate_per_sec", "z_score", "hour", "hourly_mean", "direction"]]
-    anomalies = anomalies.round(2)
 
+    if hour is not None:
+        anomalies = anomalies[anomalies["hour"] == hour]
+    if dow is not None:
+        anomalies = anomalies[anomalies["dow_num"] == dow]
+    
+    count_filtered = len(anomalies)
+
+    anomalies = anomalies.reindex(anomalies["z_robust"].abs().sort_values(ascending=False).index)
+    anomalies = anomalies.head(top_n)
+    cols = ["timestamp", "value", "net_flow", "z_robust", "hour", "dow", "hour_median", "direction"]
+    anomalies = anomalies[cols].copy()
+    numeric_cols = ["value", "net_flow", "z_robust", "hour_median"]
+    anomalies[numeric_cols] = anomalies[numeric_cols].round(2)
+    
     return {
-        "sigma_threshold": sigma,
+        "threshold": threshold,
+        "filters": {"hour": hour, "dow": dow},
         "count": count,
         "total_points": len(df),
+        "count_filtered": count_filtered,
         "top": _df_to_records(anomalies),
     }
 

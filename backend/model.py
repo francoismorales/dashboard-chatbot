@@ -1,50 +1,36 @@
 """
-Modelo de predicción de aperturas y cierres por hora.
+Modelo de predicción del flujo neto de tiendas visibles.
 
-Entrena DOS RandomForestRegressor:
-  - Uno predice rate_up (aperturas/s promedio por hora)
-  - Otro predice rate_down (cierres/s promedio por hora)
+Compara cuatro candidatos en walk-forward validation:
+  1. Baseline trivial: mediana de net_flow por hora del día.
+  2. Ridge (regresión lineal regularizada) con features cíclicas + lag.
+  3. GradientBoostingRegressor con features cíclicas + lag.
+  4. RandomForestRegressor con features cíclicas + lag.
 
-Features: hour, day_of_week, is_weekend, hour_sin/cos, dow_sin/cos.
-El encoding cíclico con seno/coseno permite al modelo entender que
-la hora 23 está "cerca" de la hora 0, y el domingo cerca del lunes.
-
-Validación: los últimos 2 días se reservan como test set.
-Métricas reportadas: MAE, RMSE, R², MAPE, y residual std para banda de confianza.
-
-Uso desde ingest.py al final:
-    from model import train_and_save
-    train_and_save(df, OUT_DIR)
+Elige automáticamente el modelo con MEJOR MAE en walk-forward.
+Si ningún modelo paramétrico bate al baseline, el baseline queda como
 """
 
 from pathlib import Path
 import json
 import pickle
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
 # ---------------------------------------------------------------------------
-# FEATURE ENGINEERING
+# Feature engineering
 # ---------------------------------------------------------------------------
 
 def make_features(timestamps: pd.Series) -> pd.DataFrame:
     """
-    Genera features temporales a partir de una serie de timestamps en hora Bogotá.
-
-    Features:
-      - hour: 0-23 (crudo)
-      - day_of_week: 0-6 (crudo, 0=lunes)
-      - is_weekend: 0/1
-      - hour_sin, hour_cos: encoding cíclico de la hora (24 es periodo)
-      - dow_sin, dow_cos: encoding cíclico del día (7 es periodo)
-
-    El encoding cíclico es clave: sin él, el modelo pensaría que la hora 23
-    está "lejos" de la hora 0, cuando en realidad están adyacentes en el ciclo.
+    Features temporales con interacciones hour×is_weekend para que el patrón
+    horario de fin de semana no sea idéntico al de entre semana.
     """
     ts = timestamps
     if ts.dt.tz is None:
@@ -53,346 +39,443 @@ def make_features(timestamps: pd.Series) -> pd.DataFrame:
 
     hour = ts.dt.hour
     dow = ts.dt.dayofweek
+    is_weekend = (dow >= 5).astype(int)
+
+    hour_sin = np.sin(2 * np.pi * hour / 24)
+    hour_cos = np.cos(2 * np.pi * hour / 24)
 
     return pd.DataFrame({
-        "hour": hour,
-        "day_of_week": dow,
-        "is_weekend": (dow >= 5).astype(int),
-        "hour_sin": np.sin(2 * np.pi * hour / 24),
-        "hour_cos": np.cos(2 * np.pi * hour / 24),
-        "dow_sin": np.sin(2 * np.pi * dow / 7),
-        "dow_cos": np.cos(2 * np.pi * dow / 7),
-    })
+        "hour": hour.values,
+        "day_of_week": dow.values,
+        "is_weekend": is_weekend.values,
+        "hour_sin": hour_sin.values,
+        "hour_cos": hour_cos.values,
+        "dow_sin": np.sin(2 * np.pi * dow / 7).values,
+        "dow_cos": np.cos(2 * np.pi * dow / 7).values,
+        "hour_sin_x_weekend": (hour_sin * is_weekend).values,
+        "hour_cos_x_weekend": (hour_cos * is_weekend).values,
+        "is_edge_hour": ((hour <= 7) | (hour >= 22)).astype(int).values,
+    }, index=timestamps.index if hasattr(timestamps, "index") else None)
 
 
 # ---------------------------------------------------------------------------
-# PREPARACIÓN DE DATOS
+# Preparación de datos
 # ---------------------------------------------------------------------------
 
 def prepare_hourly_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agrega los datos raw a nivel hora: para cada hora calendario
-    computa la MEDIANA de rate_up y rate_down.
-
-    Por qué mediana y no promedio: los datos tienen picos extremos (eventos
-    raros de ±19K/s) que contaminan los promedios. La mediana es robusta a
-    estos outliers y captura mejor el "valor típico" de cada hora, que es lo
-    que el modelo puede predecir con features temporales.
-
-    Resultado: DataFrame con columnas
-      timestamp (inicio de hora) | rate_up | rate_down
-    """
-    d = df.dropna(subset=["rate_per_sec"]).copy()
-
+    d = df.dropna(subset=["net_flow"]).copy()
     ts = d["timestamp"]
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize("UTC")
     d["timestamp"] = ts.dt.tz_convert("America/Bogota")
 
-    # Separar en apertura / cierre
-    d["rate_up_val"] = d["rate_per_sec"].where(d["rate_per_sec"] > 0, 0)
-    d["rate_down_val"] = (-d["rate_per_sec"]).where(d["rate_per_sec"] < 0, 0)
-
-    # Agregar a nivel hora usando MEDIANA (robusta a outliers)
     hourly = (
         d.set_index("timestamp")
         .resample("1h")
-        .agg(rate_up=("rate_up_val", "median"),
-             rate_down=("rate_down_val", "median"))
+        .agg(net_flow=("net_flow", "mean"))
         .reset_index()
         .dropna()
     )
-
     return hourly
 
 
+def filter_known_outliers(hourly: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+    bogota_ts = hourly["timestamp"]
+    if bogota_ts.dt.tz is None:
+        bogota_ts = bogota_ts.dt.tz_localize("UTC").dt.tz_convert("America/Bogota")
+
+    start = pd.Timestamp("2026-02-09 20:00", tz="America/Bogota")
+    end = pd.Timestamp("2026-02-09 21:00", tz="America/Bogota")
+    mask_outlier = (bogota_ts >= start) & (bogota_ts <= end)
+
+    clean = hourly[~mask_outlier].reset_index(drop=True)
+    return clean, int(mask_outlier.sum())
+
+
 def add_lag_features(hourly: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agrega features de lag: valor de hace 24h (mismo momento del día anterior).
-
-    Por qué: el mejor predictor de una serie temporal es su propio pasado
-    reciente. Si quiero predecir las 20:00 de mañana, el valor más informativo
-    es el de las 20:00 de hoy.
-
-    Nota: con solo ~10 días de datos no usamos lag de 168h (1 semana) porque
-    quitaría demasiadas filas de training. Con más historia sería ideal agregarlo.
-    """
     h = hourly.sort_values("timestamp").reset_index(drop=True).copy()
-
-    # Solo lag de 24h + rolling. Lag semanal requeriría al menos 3-4 semanas de datos.
-    for target in ["rate_up", "rate_down"]:
-        h[f"{target}_lag_24h"] = h[target].shift(24)
-        # Promedio móvil de las últimas 24 horas (tendencia reciente)
-        h[f"{target}_rolling_24h"] = h[target].shift(1).rolling(window=24, min_periods=6).mean()
-
+    h["net_flow_lag_24h"] = h["net_flow"].shift(24)
     return h
 
 
 # ---------------------------------------------------------------------------
-# ENTRENAMIENTO + EVALUACIÓN
+# Baseline: mediana por hora
 # ---------------------------------------------------------------------------
 
-def train_one_target(
-    hourly_with_lags: pd.DataFrame, target: str
-) -> Tuple[RandomForestRegressor, dict]:
+def fit_hour_median(train_df: pd.DataFrame) -> pd.Series:
+    ts = train_df["timestamp"]
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    ts = ts.dt.tz_convert("America/Bogota")
+    return train_df.assign(hour=ts.dt.hour).groupby("hour")["net_flow"].median()
+
+
+def predict_with_hour_median(timestamps: pd.Series, hour_median: pd.Series) -> np.ndarray:
+    ts = timestamps
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    hours = ts.dt.tz_convert("America/Bogota").dt.hour
+    return hours.map(hour_median).fillna(0).values
+
+
+# ---------------------------------------------------------------------------
+# Construir candidatos
+# ---------------------------------------------------------------------------
+
+def build_candidates() -> Dict[str, Any]:
     """
-    Entrena UN modelo para predecir una columna (rate_up o rate_down).
-
-    Usa features temporales (hora, día, encoding cíclico) + lag features
-    (valor de hace 24h y 168h) para capturar patrones.
-
-    Split temporal: últimos 2 días = test. El resto = train.
-    Esta estrategia simula el escenario real: predecir el futuro viendo solo
-    el pasado. NO usamos shuffle random porque sería information leak.
-
-    Devuelve (modelo_entrenado, diccionario_metricas).
+    Devuelve un dict {nombre: factory} de modelos paramétricos a comparar..
     """
-    # Filtrar filas sin lags (las primeras 24 horas no tienen lag)
-    h = hourly_with_lags.dropna(subset=[
-        f"{target}_lag_24h", f"{target}_rolling_24h"
-    ]).reset_index(drop=True).copy()
-
-    if len(h) < 30:
-        raise ValueError(
-            f"Datos insuficientes después de calcular lags ({len(h)} filas). "
-            f"Se necesita al menos 1-2 días de historia."
-        )
-
-    # Features: temporales + lags del mismo target
-    X_temporal = make_features(h["timestamp"]).reset_index(drop=True)
-    X_lags = h[[
-        f"{target}_lag_24h",
-        f"{target}_rolling_24h",
-    ]].reset_index(drop=True)
-    X = pd.concat([X_temporal, X_lags], axis=1)
-    y = h[target].values
-
-    # Split temporal: últimas 24h = test (reducido porque tenemos pocos datos)
-    cutoff = h["timestamp"].max() - pd.Timedelta(days=1)
-    train_mask = (h["timestamp"] < cutoff).to_numpy()
-    X_train, X_test = X[train_mask], X[~train_mask]
-    y_train, y_test = y[train_mask], y[~train_mask]
-
-    # RandomForest: robusto con poco dato, no requiere escalado,
-    # captura interacciones no lineales automáticamente.
-    model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=8,
-        min_samples_leaf=2,
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train, y_train)
-
-    # Evaluar en test set (nunca visto durante training)
-    y_pred = model.predict(X_test)
-
-    mae = float(mean_absolute_error(y_test, y_pred))
-    rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
-    r2 = float(r2_score(y_test, y_pred))
-
-    # MAPE: cuidado con divisiones por cero
-    nonzero = y_test > 1e-6
-    if nonzero.sum() > 0:
-        mape = float(np.mean(np.abs((y_test[nonzero] - y_pred[nonzero]) / y_test[nonzero])) * 100)
-    else:
-        mape = None
-
-    # Para la banda de confianza: usamos la desviación estándar de los residuos
-    residuals = y_test - y_pred
-    residual_std = float(np.std(residuals))
-
-    feature_importance = dict(zip(X.columns, model.feature_importances_.astype(float)))
-
-    metrics = {
-        "mae": round(mae, 3),
-        "rmse": round(rmse, 3),
-        "r2": round(r2, 4),
-        "mape_percent": round(mape, 2) if mape is not None else None,
-        "residual_std": round(residual_std, 3),
-        "n_train": int(train_mask.sum()),
-        "n_test": int((~train_mask).sum()),
-        "feature_importance": {k: round(v, 3) for k, v in feature_importance.items()},
-        "target_mean_actual": round(float(np.mean(y_test)), 3),
+    return {
+        "ridge": lambda: Ridge(alpha=1.0, random_state=42),
+        "gradient_boosting": lambda: GradientBoostingRegressor(
+            n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,
+        ),
+        "random_forest": lambda: RandomForestRegressor(
+            n_estimators=200, max_depth=8, min_samples_leaf=2,
+            random_state=42, n_jobs=-1,
+        ),
     }
 
-    return model, metrics
-
 
 # ---------------------------------------------------------------------------
-# PREDICCIÓN DEL FUTURO
+# Walk-forward que compara baseline + N modelos
 # ---------------------------------------------------------------------------
 
-def forecast_next_days(
-    model_up: RandomForestRegressor,
-    model_down: RandomForestRegressor,
-    metrics_up: dict,
-    metrics_down: dict,
+def _metrics(y_true, y_pred) -> Dict:
+    return {
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        "r2": float(r2_score(y_true, y_pred)),
+    }
+
+
+def walk_forward_compare(
     hourly_with_lags: pd.DataFrame,
-    days_ahead: int = 7,
+    min_train_hours: int = 72,
+    n_folds: int = 3,
+    test_size_hours: int = 18,
+):
+    """
+    Corre walk-forward para baseline + todos los candidatos paramétricos.
+    Devuelve summary, X_all, y_all, feature_cols, h_clean.
+    """
+    h = hourly_with_lags.dropna(subset=["net_flow_lag_24h"]).reset_index(drop=True)
+    if len(h) < min_train_hours + test_size_hours:
+        raise ValueError(
+            f"Datos insuficientes: {len(h)} horas, "
+            f"se requieren al menos {min_train_hours + test_size_hours}."
+        )
+
+    feature_cols_temporal = [
+        "hour", "day_of_week", "is_weekend",
+        "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+        "hour_sin_x_weekend", "hour_cos_x_weekend", "is_edge_hour",
+    ]
+    feature_cols = feature_cols_temporal + ["net_flow_lag_24h"]
+
+    X_temporal_all = make_features(h["timestamp"]).reset_index(drop=True)
+    X_all = pd.concat([X_temporal_all, h[["net_flow_lag_24h"]].reset_index(drop=True)], axis=1)
+    y_all = h["net_flow"].values
+
+    candidates = build_candidates()
+    fold_results: Dict[str, List[Dict]] = {name: [] for name in ["baseline"] + list(candidates.keys())}
+
+    total = len(h)
+    for fold_i in range(n_folds):
+        test_end = total - fold_i * test_size_hours
+        test_start = test_end - test_size_hours
+        train_end = test_start
+        if train_end < min_train_hours:
+            break
+
+        X_train, X_test = X_all.iloc[:train_end], X_all.iloc[test_start:test_end]
+        y_train, y_test = y_all[:train_end], y_all[test_start:test_end]
+        ts_train = h["timestamp"].iloc[:train_end]
+        ts_test = h["timestamp"].iloc[test_start:test_end]
+
+        # Baseline
+        hour_median = fit_hour_median(pd.DataFrame({"timestamp": ts_train, "net_flow": y_train}))
+        y_pred = predict_with_hour_median(ts_test, hour_median)
+        fold_results["baseline"].append(_metrics(y_test, y_pred))
+
+        # Modelos paramétricos
+        for name, factory in candidates.items():
+            model = factory()
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            fold_results[name].append(_metrics(y_test, y_pred))
+
+    if not fold_results["baseline"]:
+        raise ValueError("No se pudo ejecutar ningún fold de validación.")
+
+    # Promediar métricas por modelo
+    summary = {}
+    for name, folds in fold_results.items():
+        summary[name] = {
+            "mae": round(float(np.mean([f["mae"] for f in folds])), 3),
+            "rmse": round(float(np.mean([f["rmse"] for f in folds])), 3),
+            "r2": round(float(np.mean([f["r2"] for f in folds])), 4),
+            "n_folds": len(folds),
+        }
+
+    # Skill score de cada modelo paramétrico vs baseline
+    mae_baseline = summary["baseline"]["mae"]
+    for name in candidates.keys():
+        if mae_baseline > 0:
+            summary[name]["skill_vs_baseline"] = round(
+                1.0 - (summary[name]["mae"] / mae_baseline), 4
+            )
+        else:
+            summary[name]["skill_vs_baseline"] = None
+
+    return summary, X_all, y_all, feature_cols, h
+
+
+# ---------------------------------------------------------------------------
+# Selección del ganador + entrenar modelo final
+# ---------------------------------------------------------------------------
+
+def pick_winner(summary: Dict[str, Dict]) -> Tuple[str, Dict]:
+    """Elige el modelo con menor MAE en walk-forward."""
+    best_name = min(summary.keys(), key=lambda k: summary[k]["mae"])
+    return best_name, summary[best_name]
+
+
+def train_final_model(
+    winner_name: str,
+    X_all: pd.DataFrame,
+    y_all: np.ndarray,
+    h: pd.DataFrame,
+) -> Any:
+    """Entrena el modelo ganador con TODO el histórico."""
+    if winner_name == "baseline":
+        return fit_hour_median(h)
+
+    candidates = build_candidates()
+    model = candidates[winner_name]()
+    model.fit(X_all, y_all)
+    return model
+
+
+def compute_feature_importance(
+    winner_name: str,
+    final_model: Any,
+    feature_cols: List[str],
+) -> Dict[str, float]:
+    """Adapta el cálculo de importancia según el tipo de modelo ganador."""
+    if winner_name == "baseline":
+        # final_model es una Series indexada por hora
+        abs_medians = final_model.abs()
+        total = abs_medians.sum() if abs_medians.sum() > 0 else 1.0
+        return {
+            f"hora_{int(h_):02d}h": round(float(v / total), 4)
+            for h_, v in abs_medians.items()
+        }
+    elif winner_name == "ridge":
+        coefs_abs = np.abs(final_model.coef_)
+        total = coefs_abs.sum() if coefs_abs.sum() > 0 else 1.0
+        return {col: round(float(c / total), 4) for col, c in zip(feature_cols, coefs_abs)}
+    else:
+        # GradientBoosting y RandomForest tienen .feature_importances_
+        return {
+            col: round(float(imp), 4)
+            for col, imp in zip(feature_cols, final_model.feature_importances_)
+        }
+
+
+def compute_residual_std(
+    winner_name: str,
+    final_model: Any,
+    X_all: pd.DataFrame,
+    y_all: np.ndarray,
+    h: pd.DataFrame,
+    test_size_hours: int = 18,
+) -> float:
+    """Desviación de residuos del último fold, para la banda de confianza."""
+    last_test_idx = slice(len(h) - test_size_hours, len(h))
+    if winner_name == "baseline":
+        y_pred = predict_with_hour_median(h["timestamp"].iloc[last_test_idx], final_model)
+    else:
+        y_pred = final_model.predict(X_all.iloc[last_test_idx])
+    residuals = y_all[last_test_idx] - y_pred
+    return float(np.std(residuals))
+
+
+# ---------------------------------------------------------------------------
+# Forecast
+# ---------------------------------------------------------------------------
+
+def forecast_next_hours(
+    winner_name: str,
+    final_model: Any,
+    metrics: Dict,
+    hourly_with_lags: pd.DataFrame,
+    hours_ahead: int = 48,
 ) -> pd.DataFrame:
     """
-    Genera predicciones horarias para los próximos N días.
-
-    Estrategia: para cada hora futura, los lags se toman del mismo día/hora
-    del PASADO (24h antes o 168h antes). No hacemos predicción recursiva
-    (que acumularía errores), sino que usamos los valores REALES del pasado
-    como features, aprovechando que los patrones son cíclicos.
-
-    Incluye banda de confianza 95% basada en residual_std del test set.
+    Forecast de las próximas N horas.
+    - Si el ganador es baseline: aplica la mediana por hora al timestamp.
+    - Si es paramétrico: forecast recursivo con lag_24h.
     """
-    last_timestamp = hourly_with_lags["timestamp"].max()
-    if last_timestamp.tz is None:
-        last_timestamp = last_timestamp.tz_localize("UTC").tz_convert("America/Bogota")
+    h = hourly_with_lags.sort_values("timestamp").reset_index(drop=True).copy()
+    last_ts = h["timestamp"].max()
+    if last_ts.tz is None:
+        last_ts = last_ts.tz_localize("UTC").tz_convert("America/Bogota")
 
-    start = last_timestamp.ceil("1h")
-    future_ts = pd.date_range(
-        start=start,
-        periods=days_ahead * 24,
-        freq="1h",
-        tz="America/Bogota",
-    )
+    start = (last_ts + pd.Timedelta(hours=1)).floor("1h")
+    future_ts = pd.date_range(start=start, periods=hours_ahead, freq="1h", tz="America/Bogota")
+    band = 1.96 * metrics["residual_std"]
 
-    # Lookup de valores históricos para resolver los lags futuros
-    hist = hourly_with_lags.set_index("timestamp")
-
-    # Usamos el promedio global como rolling_24h para el futuro (aproximación)
-    mean_up = float(hourly_with_lags["rate_up"].mean())
-    mean_down = float(hourly_with_lags["rate_down"].mean())
-
-    # Construir DataFrame de features para el futuro
-    rows = []
-    for ts in future_ts:
-        lag_24 = ts - pd.Timedelta(hours=24)
-
-        # Si el lag cae dentro del histórico lo usamos; si no, usamos el promedio
-        up_24 = hist.loc[lag_24, "rate_up"] if lag_24 in hist.index else mean_up
-        down_24 = hist.loc[lag_24, "rate_down"] if lag_24 in hist.index else mean_down
-
-        rows.append({
-            "timestamp": ts,
-            "rate_up_lag_24h": up_24,
-            "rate_up_rolling_24h": mean_up,
-            "rate_down_lag_24h": down_24,
-            "rate_down_rolling_24h": mean_down,
+    if winner_name == "baseline":
+        y_pred = predict_with_hour_median(pd.Series(future_ts), final_model)
+        return pd.DataFrame({
+            "timestamp": future_ts,
+            "pred_net_flow": y_pred,
+            "pred_net_flow_low": y_pred - band,
+            "pred_net_flow_high": y_pred + band,
         })
 
-    future_df = pd.DataFrame(rows)
-    X_temporal = make_features(future_df["timestamp"]).reset_index(drop=True)
+    # Paramétrico: forecast recursivo con lag_24h
+    hist_lookup = h.set_index("timestamp")["net_flow"].to_dict()
+    preds = []
+    for ts in future_ts:
+        lag_ts = ts - pd.Timedelta(hours=24)
+        if lag_ts in hist_lookup:
+            lag_val = hist_lookup[lag_ts]
+        else:
+            prev = next((p for p in preds if p["timestamp"] == lag_ts), None)
+            lag_val = prev["pred_net_flow"] if prev else h["net_flow"].mean()
 
-    # Features para cada modelo
-    X_up = pd.concat([
-        X_temporal,
-        future_df[["rate_up_lag_24h", "rate_up_rolling_24h"]].reset_index(drop=True),
-    ], axis=1)
-    X_down = pd.concat([
-        X_temporal,
-        future_df[["rate_down_lag_24h", "rate_down_rolling_24h"]].reset_index(drop=True),
-    ], axis=1)
+        x_temporal = make_features(pd.Series([ts]))
+        x_full = pd.concat([
+            x_temporal.reset_index(drop=True),
+            pd.DataFrame({"net_flow_lag_24h": [lag_val]}),
+        ], axis=1)
+        y = float(final_model.predict(x_full)[0])
 
-    pred_up = model_up.predict(X_up)
-    pred_down = model_down.predict(X_down)
+        preds.append({
+            "timestamp": ts,
+            "pred_net_flow": y,
+            "pred_net_flow_low": y - band,
+            "pred_net_flow_high": y + band,
+        })
 
-    # Banda 95%: ±1.96 × residual_std
-    band_up = 1.96 * metrics_up["residual_std"]
-    band_down = 1.96 * metrics_down["residual_std"]
-
-    future_df["pred_up"] = np.maximum(pred_up, 0)
-    future_df["pred_up_low"] = np.maximum(pred_up - band_up, 0)
-    future_df["pred_up_high"] = pred_up + band_up
-
-    future_df["pred_down"] = np.maximum(pred_down, 0)
-    future_df["pred_down_low"] = np.maximum(pred_down - band_down, 0)
-    future_df["pred_down_high"] = pred_down + band_down
-
-    future_df["pred_net"] = future_df["pred_up"] - future_df["pred_down"]
-
-    # Limpiar columnas intermedias
-    keep = ["timestamp", "pred_up", "pred_up_low", "pred_up_high",
-            "pred_down", "pred_down_low", "pred_down_high", "pred_net"]
-    return future_df[keep]
+    out = pd.DataFrame(preds)
+    out["timestamp"] = pd.to_datetime(out["timestamp"])
+    return out
 
 
 # ---------------------------------------------------------------------------
-# PIPELINE COMPLETO: ENTRENA, EVALÚA, GUARDA
+# Pipeline
 # ---------------------------------------------------------------------------
+
+PRETTY_NAMES = {
+    "baseline": "Mediana histórica por hora del día",
+    "ridge": "Ridge (regresión lineal regularizada)",
+    "gradient_boosting": "GradientBoostingRegressor",
+    "random_forest": "RandomForestRegressor",
+}
+
 
 def train_and_save(df_raw: pd.DataFrame, out_dir: Path) -> dict:
-    """
-    Pipeline completo:
-      1. Agregar a nivel hora
-      2. Entrenar 2 modelos (aperturas y cierres)
-      3. Evaluar métricas en test set
-      4. Generar forecast de 7 días
-      5. Guardar modelos + forecast + métricas
-
-    Devuelve un dict con las métricas (útil para imprimir en consola).
-    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n🧠 Entrenando modelo de predicción...")
+    print("\n🧠 Entrenando y comparando candidatos…")
     hourly = prepare_hourly_dataset(df_raw)
     print(f"   Dataset horario: {len(hourly)} puntos "
           f"({hourly['timestamp'].min()} → {hourly['timestamp'].max()})")
 
-    # Agregar lag features (valores de hace 24h y 168h)
-    hourly_lags = add_lag_features(hourly)
+    hourly_clean, n_excluded = filter_known_outliers(hourly)
+    print(f"   Horas excluidas por cluster de monitoreo (9-feb 20h): {n_excluded}")
+
+    hourly_lags = add_lag_features(hourly_clean)
     n_usable = hourly_lags.dropna().shape[0]
-    print(f"   Con lag features aplicados: {n_usable} puntos utilizables")
+    print(f"   Horas usables con lag_24h: {n_usable}")
 
-    model_up, metrics_up = train_one_target(hourly_lags, "rate_up")
-    model_down, metrics_down = train_one_target(hourly_lags, "rate_down")
-
-    print(f"   Modelo APERTURAS → MAE={metrics_up['mae']:.2f}  "
-          f"R²={metrics_up['r2']:.3f}  MAPE={metrics_up['mape_percent']}%")
-    print(f"   Modelo CIERRES   → MAE={metrics_down['mae']:.2f}  "
-          f"R²={metrics_down['r2']:.3f}  MAPE={metrics_down['mape_percent']}%")
-
-    # Forecast 7 días
-    forecast = forecast_next_days(
-        model_up, model_down, metrics_up, metrics_down,
-        hourly_with_lags=hourly_lags,
-        days_ahead=7,
+    summary, X_all, y_all, feature_cols, h_clean = walk_forward_compare(
+        hourly_lags, min_train_hours=72, n_folds=3, test_size_hours=18,
     )
 
-    # Guardar todo
-    with open(out_dir / "model_up.pkl", "wb") as f:
-        pickle.dump(model_up, f)
-    with open(out_dir / "model_down.pkl", "wb") as f:
-        pickle.dump(model_down, f)
+    # Imprimir tabla comparativa
+    print("\n   📊 Comparativa walk-forward (menor MAE = mejor):")
+    print(f"   {'modelo':40s}  {'MAE':>8s}  {'RMSE':>8s}  {'R²':>7s}  {'skill':>10s}")
+    print(f"   {'-' * 82}")
+    for name in ["baseline", "ridge", "gradient_boosting", "random_forest"]:
+        s = summary[name]
+        skill = s.get("skill_vs_baseline")
+        skill_str = f"{skill:+.1%}" if skill is not None else "(referencia)"
+        print(f"   {PRETTY_NAMES[name]:40s}  {s['mae']:>8.1f}  {s['rmse']:>8.1f}  {s['r2']:>7.3f}  {skill_str:>10s}")
 
-    # Forecast a parquet (para el frontend)
+    # Ganador
+    winner_name, winner_metrics = pick_winner(summary)
+    print(f"\n   🏆 Ganador (menor MAE): {PRETTY_NAMES[winner_name]}")
+    if winner_name == "baseline":
+        print("      → Ningún modelo paramétrico superó la mediana por hora.")
+        print("      → Decisión consciente: el baseline es el modelo final.")
+
+    # Entrenar modelo final con TODO el histórico
+    final_model = train_final_model(winner_name, X_all, y_all, h_clean)
+
+    # Métricas finales del modelo ganador
+    residual_std = compute_residual_std(winner_name, final_model, X_all, y_all, h_clean)
+    metrics_final = {**winner_metrics, "residual_std": round(residual_std, 3)}
+    metrics_final["feature_importance"] = compute_feature_importance(
+        winner_name, final_model, feature_cols,
+    )
+
+    # Forecast
+    forecast = forecast_next_hours(winner_name, final_model, metrics_final, hourly_lags, hours_ahead=48)
+
+    # Guardar artefactos
+    with open(out_dir / "model_net_flow.pkl", "wb") as f:
+        pickle.dump(final_model, f)
+
     forecast_to_save = forecast.copy()
     forecast_to_save["timestamp"] = forecast_to_save["timestamp"].astype(str)
     forecast_to_save.to_parquet(out_dir / "forecast.parquet", index=False)
 
-    # Métricas a JSON
+    if winner_name == "baseline":
+        selection_note = (
+            "Ningún modelo paramétrico superó al baseline — con 174 horas de "
+            "datos y un patrón horario que explica ~89% de la varianza, agregar "
+            "capacidad de modelo introduce más error del que remueve."
+        )
+    else:
+        skill = winner_metrics.get("skill_vs_baseline") or 0
+        selection_note = (
+            f"Este modelo redujo el MAE del baseline en {skill:.1%}."
+        )
+
     model_info = {
+        "model_type": PRETTY_NAMES[winner_name],
+        "winner": winner_name,
+        "model_selection_note": (
+            f"Se compararon 4 candidatos en walk-forward validation: baseline "
+            f"(mediana por hora), Ridge, GradientBoosting, RandomForest. "
+            f"Ganador por menor MAE: {PRETTY_NAMES[winner_name]}. " + selection_note
+        ),
+        "all_candidates": {PRETTY_NAMES[k]: summary[k] for k in summary},
         "trained_on": {
-            "start": str(hourly["timestamp"].min()),
-            "end": str(hourly["timestamp"].max()),
-            "n_hours": int(len(hourly)),
+            "start": str(hourly_clean["timestamp"].min()),
+            "end": str(hourly_clean["timestamp"].max()),
+            "n_hours": int(len(hourly_clean)),
+            "excluded_outlier_hours": n_excluded,
         },
         "forecast": {
             "start": str(forecast["timestamp"].min()),
             "end": str(forecast["timestamp"].max()),
             "n_hours": int(len(forecast)),
-            "days_ahead": 7,
+            "hours_ahead": 48,
         },
-        "metrics_up": metrics_up,
-        "metrics_down": metrics_down,
-        "model_type": "RandomForestRegressor",
-        "model_params": {
-            "n_estimators": 200,
-            "max_depth": 8,
-            "min_samples_leaf": 2,
-        },
+        "metrics_model": metrics_final,
+        "metrics_baseline": summary["baseline"],
     }
+
     with open(out_dir / "model_info.json", "w", encoding="utf-8") as f:
         json.dump(model_info, f, indent=2, ensure_ascii=False)
 
-    print(f"   ✔ Modelos guardados en {out_dir}")
-    print(f"   ✔ Forecast de 7 días generado ({len(forecast)} horas)")
-
+    print(f"\n   ✔ Modelo guardado en {out_dir}")
+    print(f"   ✔ Forecast de {len(forecast)} horas generado")
     return model_info

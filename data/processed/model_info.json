@@ -1,61 +1,80 @@
 {
+  "model_type": "Mediana histórica por hora del día",
+  "winner": "baseline",
+  "model_selection_note": "Se compararon 4 candidatos en walk-forward validation: baseline (mediana por hora), Ridge, GradientBoosting, RandomForest. Ganador por menor MAE: Mediana histórica por hora del día. Ningún modelo paramétrico superó al baseline — con 174 horas de datos y un patrón horario que explica ~89% de la varianza, agregar capacidad de modelo introduce más error del que remueve.",
+  "all_candidates": {
+    "Mediana histórica por hora del día": {
+      "mae": 83.047,
+      "rmse": 180.36,
+      "r2": 0.8911,
+      "n_folds": 3
+    },
+    "Ridge (regresión lineal regularizada)": {
+      "mae": 231.383,
+      "rmse": 323.653,
+      "r2": 0.7337,
+      "n_folds": 3,
+      "skill_vs_baseline": -1.7862
+    },
+    "GradientBoostingRegressor": {
+      "mae": 94.571,
+      "rmse": 192.434,
+      "r2": 0.8876,
+      "n_folds": 3,
+      "skill_vs_baseline": -0.1388
+    },
+    "RandomForestRegressor": {
+      "mae": 100.058,
+      "rmse": 211.624,
+      "r2": 0.8726,
+      "n_folds": 3,
+      "skill_vs_baseline": -0.2048
+    }
+  },
   "trained_on": {
     "start": "2026-02-01 06:00:00-05:00",
     "end": "2026-02-11 15:00:00-05:00",
-    "n_hours": 200
+    "n_hours": 198,
+    "excluded_outlier_hours": 2
   },
   "forecast": {
-    "start": "2026-02-11 15:00:00-05:00",
-    "end": "2026-02-18 14:00:00-05:00",
-    "n_hours": 168,
-    "days_ahead": 7
+    "start": "2026-02-11 16:00:00-05:00",
+    "end": "2026-02-13 15:00:00-05:00",
+    "n_hours": 48,
+    "hours_ahead": 48
   },
-  "metrics_up": {
-    "mae": 38.008,
-    "rmse": 100.62,
-    "r2": 0.254,
-    "mape_percent": 37.67,
-    "residual_std": 97.35,
-    "n_train": 156,
-    "n_test": 20,
+  "metrics_model": {
+    "mae": 83.047,
+    "rmse": 180.36,
+    "r2": 0.8911,
+    "n_folds": 3,
+    "residual_std": 32.419,
     "feature_importance": {
-      "hour": 0.038,
-      "day_of_week": 0.015,
-      "is_weekend": 0.001,
-      "hour_sin": 0.032,
-      "hour_cos": 0.804,
-      "dow_sin": 0.012,
-      "dow_cos": 0.005,
-      "rate_up_lag_24h": 0.041,
-      "rate_up_rolling_24h": 0.052
-    },
-    "target_mean_actual": 90.422
+      "hora_00h": 0.488,
+      "hora_06h": 0.0011,
+      "hora_07h": 0.0016,
+      "hora_08h": 0.0232,
+      "hora_09h": 0.0569,
+      "hora_10h": 0.0469,
+      "hora_11h": 0.0368,
+      "hora_12h": 0.0431,
+      "hora_13h": 0.0374,
+      "hora_14h": 0.0315,
+      "hora_15h": 0.0118,
+      "hora_16h": 0.0022,
+      "hora_17h": 0.0127,
+      "hora_18h": 0.0123,
+      "hora_19h": 0.0058,
+      "hora_20h": 0.0272,
+      "hora_21h": 0.042,
+      "hora_22h": 0.0551,
+      "hora_23h": 0.0645
+    }
   },
-  "metrics_down": {
-    "mae": 74.603,
-    "rmse": 173.115,
-    "r2": 0.9458,
-    "mape_percent": 51.85,
-    "residual_std": 158.121,
-    "n_train": 156,
-    "n_test": 20,
-    "feature_importance": {
-      "hour": 0.506,
-      "day_of_week": 0.023,
-      "is_weekend": 0.003,
-      "hour_sin": 0.0,
-      "hour_cos": 0.398,
-      "dow_sin": 0.044,
-      "dow_cos": 0.005,
-      "rate_down_lag_24h": 0.005,
-      "rate_down_rolling_24h": 0.014
-    },
-    "target_mean_actual": 235.912
-  },
-  "model_type": "RandomForestRegressor",
-  "model_params": {
-    "n_estimators": 200,
-    "max_depth": 8,
-    "min_samples_leaf": 2
+  "metrics_baseline": {
+    "mae": 83.047,
+    "rmse": 180.36,
+    "r2": 0.8911,
+    "n_folds": 3
   }
 }

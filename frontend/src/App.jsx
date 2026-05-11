@@ -1,7 +1,7 @@
 // src/App.jsx
 import { useEffect, useState } from "react";
 import {
-  LineChart, Line, BarChart, Bar,
+  LineChart, Line, BarChart, Bar,  Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, ReferenceLine,
 } from "recharts";
 import { api } from "./api";
@@ -9,7 +9,7 @@ import ChatBot from "./ChatBot";
 import ForecastChart from "./ForecastChart";
 import "./App.css";
 
-// Paleta: rojo-Rappi para aperturas, azul para cierres
+// Paleta: rojo-Rappi para crecimiento, azul para decrecimiento
 const COLOR_UP = "#FF441F";
 const COLOR_DOWN = "#1F6FFF";
 
@@ -100,8 +100,8 @@ function Heatmap({ data, absMax }) {
       const label = val == null
         ? "sin datos"
         : val >= 0
-          ? `+${fmtDec.format(val)} aperturas/s neto`
-          : `−${fmtDec.format(Math.abs(val))} cierres/s neto`;
+          ? `+${fmtDec.format(val)} /s · saldo crece`
+          : `−${fmtDec.format(Math.abs(val))} /s · saldo decrece`;
       cells.push(
         <div
           key={`c-${dowIdx}-${h}`}
@@ -117,9 +117,9 @@ function Heatmap({ data, absMax }) {
     <div className="hm-wrap">
       <div className="hm-grid">{cells}</div>
       <div className="hm-legend">
-        <span>Cierres dominan</span>
+        <span>Saldo decrece</span>
         <div className="hm-scale-bi" />
-        <span>Aperturas dominan</span>
+        <span>Saldo crece</span>
       </div>
     </div>
   );
@@ -135,7 +135,10 @@ export default function App() {
   const [daily, setDaily] = useState([]);
   const [heatmap, setHeatmap] = useState(null);
   const [anomalies, setAnomalies] = useState(null);
-  const [sigma, setSigma] = useState(3);
+  const [threshold, setThreshold] = useState(6);
+  const [filterHour, setFilterHour] = useState("");
+  const [filterDow, setFilterDow] = useState("");
+  const [byDate, setByDate] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -146,16 +149,16 @@ export default function App() {
       api.timeseries({ granularity }),
       api.peaks(10),
       api.hourlyPattern(),
-      api.dailyPattern(),
+      api.byDate(),
       api.heatmap(),
-      api.anomalies({ sigma: 3, topN: 15 }),
+      api.anomalies({ threshold: 6, topN: 15 }),
     ])
-      .then(([s, ts, p, h, d, hm, an]) => {
+      .then(([s, ts, p, h, bd, hm, an]) => {
         setSummary(s);
         setSeries(ts.data);
         setPeaks(p);
         setHourly(h.data);
-        setDaily(d.data);
+        setByDate(bd.data);
         setHeatmap(hm);
         setAnomalies(an);
         setError(null);
@@ -171,8 +174,13 @@ export default function App() {
 
   useEffect(() => {
     if (!summary) return;
-    api.anomalies({ sigma, topN: 15 }).then(setAnomalies);
-  }, [sigma]);
+    api.anomalies({
+      threshold,
+      topN: 15,
+      hour: filterHour === "" ? undefined : Number(filterHour),
+      dow:  filterDow  === "" ? undefined : Number(filterDow),
+    }).then(setAnomalies);
+}, [threshold, filterHour, filterDow]);
 
   if (loading) return <div className="loading">⏳ Cargando datos…</div>;
   if (error) return <div className="error">❌ {error}<br/>¿Está corriendo el backend en localhost:8000?</div>;
@@ -180,11 +188,13 @@ export default function App() {
   const metricKey = Object.keys(summary.metrics)[0];
   const m = summary.metrics[metricKey];
 
-  // Para el gráfico bidireccional: invertimos rate_down para que vaya hacia abajo
-  const bidirectionalSeries = series.map((r) => ({
-    ...r,
-    rate_down_neg: r.rate_down != null ? -r.rate_down : null,
-  }));
+  // Cálculo del offset del cero para el gradiente bicolor de la línea principal.
+  const flowValues = series.map((r) => r.net_flow ?? 0);
+  const flowMax = flowValues.length ? Math.max(...flowValues) : 0;
+  const flowMin = flowValues.length ? Math.min(...flowValues) : 0;
+  const zeroOffset = flowMax === flowMin
+    ? 0.5
+    : flowMax / (flowMax - flowMin);
 
   return (
     <div className="app">
@@ -192,9 +202,9 @@ export default function App() {
         <div>
           <h1>📊 Rappi · Disponibilidad de Tiendas</h1>
           <p className="subtitle">
-            Registro de cambios online/offline · {fmtDateTime(summary.period.start)} → {fmtDateTime(summary.period.end)}
+            Flujo neto agregado de tiendas visibles · {fmtDateTime(summary.period.start)} → {fmtDateTime(summary.period.end)}
             {" · "}
-            <strong>{fmtInt.format(summary.period.total_points)}</strong> muestras cada 10s
+            <strong>{fmtInt.format(summary.period.total_points)}</strong> muestras cada 10s · datos disponibles ~18h/día
           </p>
         </div>
       </header>
@@ -202,35 +212,35 @@ export default function App() {
       {/* -------- KPI Cards (con lenguaje operacional correcto) -------- */}
       <div className="kpi-grid">
         <KpiCard
-          label="Tiendas online (último registro)"
-          value={fmtInt.format(m.value_end)}
-          hint={`desde ${fmtInt.format(m.value_start)} al inicio del período`}
+          label="Último valor observado"
+          value={fmtInt.format(m.value_last_observation)}
+          hint={`pico del período: ${fmtInt.format(m.value_max)} · ${fmtShortTime(m.value_max_at)}`}
           accent="#0E0B08"
         />
         <KpiCard
-          label="Mayor apertura masiva"
-          value={`+${fmtInt.format(m.max_rate_up)}`}
-          hint={`tiendas/seg · ${fmtShortTime(m.peak_up_at)}`}
+          label="Mayor crecimiento neto"
+          value={`+${fmtDec.format(m.max_net_growth_per_sec)} /s`}
+          hint={fmtShortTime(m.peak_growth_at)}
           accent={COLOR_UP}
         />
         <KpiCard
-          label="Mayor cierre masivo"
-          value={`−${fmtInt.format(m.max_rate_down)}`}
-          hint={`tiendas/seg · ${fmtShortTime(m.peak_down_at)}`}
+          label="Mayor decrecimiento neto"
+          value={`−${fmtDec.format(m.max_net_attrition_per_sec)} /s`}
+          hint={fmtShortTime(m.peak_attrition_at)}
           accent={COLOR_DOWN}
         />
         <KpiCard
-          label="Eventos registrados"
-          value={`${fmtInt.format(m.n_up_points)} / ${fmtInt.format(m.n_down_points)}`}
-          hint="aperturas / cierres (muestras con cambio)"
+          label="Cobertura del dataset"
+          value={`${fmtInt.format(summary.period.total_points)} muestras`}
+          hint={`${summary.period.duration_hours.toFixed(0)} h · 06h–00h cada día`}
           accent="#0E0B08"
         />
       </div>
 
-      {/* -------- Serie temporal bidireccional -------- */}
+      {/* -------- Serie temporal del flujo neto -------- */}
       <Section
-        title="Cambios de disponibilidad en el tiempo"
-        subtitle="Arriba: tiendas que se pusieron online · Abajo: tiendas que pasaron a offline (tiendas por segundo)"
+        title="Flujo neto de tiendas visibles"
+        subtitle="Saldo neto por intervalo · positivo: el saldo crece · negativo: el saldo decrece."
         right={
           <select
             className="selector"
@@ -244,7 +254,15 @@ export default function App() {
         }
       >
         <ResponsiveContainer width="100%" height={360}>
-          <LineChart data={bidirectionalSeries} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+          <LineChart data={series} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+            <defs>
+              <linearGradient id="netFlowGradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stopColor={COLOR_UP} />
+                <stop offset={zeroOffset} stopColor={COLOR_UP} />
+                <stop offset={zeroOffset} stopColor={COLOR_DOWN} />
+                <stop offset="1" stopColor={COLOR_DOWN} />
+              </linearGradient>
+            </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
             <XAxis
               dataKey="timestamp"
@@ -260,73 +278,80 @@ export default function App() {
             <Tooltip
               labelFormatter={fmtShortTime}
               formatter={(v, name) => {
-                if (name === "Aperturas/s") return [`+${fmtDec.format(v)}`, name];
-                if (name === "Cierres/s") return [`−${fmtDec.format(Math.abs(v))}`, name];
-                return [v, name];
+                if (v == null) return ["—", "Flujo neto"];
+                const sign = v >= 0 ? "+" : "−";
+                return [`${sign}${fmtDec.format(Math.abs(v))} /s`, "Flujo neto"];
               }}
             />
-            <Legend />
             <ReferenceLine y={0} stroke="#999" strokeWidth={1} />
             <Line
-              type="monotone" dataKey="rate_up" name="Aperturas/s"
-              stroke={COLOR_UP} dot={false} strokeWidth={2}
-            />
-            <Line
-              type="monotone" dataKey="rate_down_neg" name="Cierres/s"
-              stroke={COLOR_DOWN} dot={false} strokeWidth={2}
+              type="monotone"
+              dataKey="net_flow"
+              name="Flujo neto"
+              stroke="url(#netFlowGradient)"
+              strokeWidth={2}
+              dot={false}
             />
           </LineChart>
         </ResponsiveContainer>
       </Section>
 
-      {/* -------- Heatmap bidireccional -------- */}
+      {/* -------- Heatmap -------- */}
       <Section
         title="Mapa de calor · Día × Hora"
-        subtitle="Balance de tiendas online ganadas vs perdidas · Rojo: dominan aperturas · Azul: dominan cierres"
+        subtitle="Saldo neto promedio por día de semana × hora · Rojo: el saldo crece · Azul: el saldo decrece"
       >
         {heatmap && <Heatmap data={heatmap.data} absMax={heatmap.abs_max} />}
       </Section>
 
-      {/* -------- Fila con 2 gráficos bidireccionales -------- */}
+      
       <div className="two-col">
-        <Section title="Patrón por hora del día" subtitle="Tiendas que abren (arriba) vs cierran (abajo) en promedio">
+        <Section title="Flujo neto promedio por hora del día" subtitle="Saldo neto promedio en cada hora · positivo: crece · negativo: decrece">
           <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={hourly.map((h) => ({ ...h, avg_down_neg: -h.avg_down }))}
-              stackOffset="sign">
+            <BarChart data={hourly}>
               <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
               <XAxis dataKey="hour" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => fmtInt.format(Math.abs(v))} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => fmtInt.format(v)} />
               <Tooltip
-                formatter={(v, name) => {
-                  if (name === "Aperturas") return [`+${fmtDec.format(v)} /s`, name];
-                  if (name === "Cierres") return [`−${fmtDec.format(Math.abs(v))} /s`, name];
-                  return [v, name];
-                }}
+                formatter={(v) => {
+                if (v == null) return ["—", "Flujo neto"];
+                const sign = v >= 0 ? "+" : "−";
+                return [`${sign}${fmtDec.format(Math.abs(v))} /s`, "Flujo neto"];
+              }}
               />
               <ReferenceLine y={0} stroke="#999" />
-              <Bar dataKey="avg_up" name="Aperturas" stackId="a" fill={COLOR_UP} />
-              <Bar dataKey="avg_down_neg" name="Cierres" stackId="a" fill={COLOR_DOWN} />
+              <Bar dataKey="avg_net_flow" name="Flujo neto">
+                {hourly.map((h, i) => (
+                  <Cell key={i} fill={h.avg_net_flow >= 0 ? COLOR_UP : COLOR_DOWN} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </Section>
 
-        <Section title="Patrón por día de la semana" subtitle="Balance semanal de aperturas vs cierres de tiendas">
+        <Section title="Balance diario por fecha" subtitle="Flujo neto promedio en cada día del período">
           <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={daily.map((d) => ({ ...d, avg_down_neg: -d.avg_down }))}
-              stackOffset="sign">
+            <BarChart data={byDate}>
               <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-              <XAxis dataKey="day" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => fmtInt.format(Math.abs(v))} />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => fmtInt.format(v)} />
               <Tooltip
-                formatter={(v, name) => {
-                  if (name === "Aperturas") return [`+${fmtDec.format(v)} /s`, name];
-                  if (name === "Cierres") return [`−${fmtDec.format(Math.abs(v))} /s`, name];
-                  return [v, name];
+               labelFormatter={(label, payload) => {
+                  if (!payload?.[0]) return label;
+                  return payload[0].payload.date;
+                }}
+                formatter={(v) => {
+                  if (v == null) return ["—", "Flujo neto"];
+                  const sign = v >= 0 ? "+" : "−";
+                  return [`${sign}${fmtDec.format(Math.abs(v))} /s`, "Flujo neto"];
                 }}
               />
               <ReferenceLine y={0} stroke="#999" />
-              <Bar dataKey="avg_up" name="Aperturas" stackId="a" fill={COLOR_UP} />
-              <Bar dataKey="avg_down_neg" name="Cierres" stackId="a" fill={COLOR_DOWN} />
+              <Bar dataKey="avg_net_flow" name="Flujo neto">
+                {byDate.map((d, i) => (
+                  <Cell key={i} fill={d.avg_net_flow >= 0 ? COLOR_UP : COLOR_DOWN} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </Section>
@@ -334,22 +359,27 @@ export default function App() {
 
       {/* -------- Top picos: 2 tablas lado a lado -------- */}
       <div className="two-col">
-        <Section title="🔺 Top 10 aperturas masivas" subtitle="Momentos donde más tiendas se pusieron online en 10s">
+        <Section title="🔺 Top 10 picos de crecimiento neto" subtitle="Momentos de mayor saldo positivo en 10s · ⚠ marca posibles glitches de monitoreo">
           <table className="peaks-table">
             <thead>
               <tr>
                 <th>#</th>
                 <th>Timestamp</th>
-                <th style={{ textAlign: "right" }}>Tiendas/s</th>
+                <th style={{ textAlign: "right" }}>Flujo /s</th>
               </tr>
             </thead>
             <tbody>
-              {peaks?.top_up?.map((p, i) => (
+              {peaks?.top_growth?.map((p, i) => (
                 <tr key={i}>
                   <td>{i + 1}</td>
-                  <td>{fmtDateTime(p.timestamp)}</td>
+                  <td>
+                    {fmtDateTime(p.timestamp)}
+                    {p.is_suspicious && (
+                      <span title="Tiene un pico opuesto dentro de ±5 min — probable artefacto de monitoreo" style={{ marginLeft: 6, color: "#F59E0B" }}>⚠</span>
+                    )}
+                  </td>
                   <td style={{ textAlign: "right", color: COLOR_UP, fontWeight: 600 }}>
-                    +{fmtDec.format(p.rate_per_sec)}
+                    +{fmtDec.format(p.net_flow)}
                   </td>
                 </tr>
               ))}
@@ -357,22 +387,27 @@ export default function App() {
           </table>
         </Section>
 
-        <Section title="🔻 Top 10 cierres masivos" subtitle="Momentos donde más tiendas pasaron a offline en 10s">
+        <Section title="🔻 Top 10 picos de decrecimiento neto" subtitle="Momentos de mayor saldo negativo en 10s · ⚠ marca posibles glitches de monitoreo">
           <table className="peaks-table">
             <thead>
               <tr>
                 <th>#</th>
                 <th>Timestamp</th>
-                <th style={{ textAlign: "right" }}>Tiendas/s</th>
+                <th style={{ textAlign: "right" }}>Flujo /s</th>
               </tr>
             </thead>
             <tbody>
-              {peaks?.top_down?.map((p, i) => (
+              {peaks?.top_attrition?.map((p, i) => (
                 <tr key={i}>
                   <td>{i + 1}</td>
-                  <td>{fmtDateTime(p.timestamp)}</td>
+                  <td>
+                    {fmtDateTime(p.timestamp)}
+                    {p.is_suspicious && (
+                      <span title="Tiene un pico opuesto dentro de ±5 min — probable artefacto de monitoreo" style={{ marginLeft: 6, color: "#F59E0B" }}>⚠</span>
+                    )}
+                  </td>
                   <td style={{ textAlign: "right", color: COLOR_DOWN, fontWeight: 600 }}>
-                    −{fmtDec.format(p.rate_per_sec)}
+                    {fmtDec.format(p.net_flow)}
                   </td>
                 </tr>
               ))}
@@ -381,23 +416,61 @@ export default function App() {
         </Section>
       </div>
 
-      {/* -------- Anomalías bidireccionales -------- */}
+      {/* -------- Anomalías -------- */}
       <Section
         title="🚨 Eventos anómalos detectados"
-        subtitle={anomalies ? `${anomalies.count} cambios extremos fuera de ±${anomalies.sigma_threshold}σ del comportamiento normal de esa hora (de ${fmtInt.format(anomalies.total_points)} muestras)` : ""}
+        subtitle={
+          anomalies
+            ? `${anomalies.count_filtered ?? anomalies.count} de ${anomalies.count} anomalías visibles (z robusto > ${anomalies.threshold})${
+                filterDow !== "" || filterHour !== "" ? " · filtros activos" : ""
+              } · ${fmtInt.format(anomalies.total_points)} muestras analizadas`
+            : ""
+        }
         right={
-          <div className="sigma-control">
-            <label>Umbral σ:</label>
-            <select
-              className="selector"
-              value={sigma}
-              onChange={(e) => setSigma(Number(e.target.value))}
-            >
-              <option value="2">2σ (más laxo)</option>
-              <option value="3">3σ (estándar)</option>
-              <option value="4">4σ (estricto)</option>
-              <option value="5">5σ (muy estricto)</option>
-            </select>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div className="sigma-control">
+              <label>Día:</label>
+              <select
+                className="selector"
+                value={filterDow}
+                onChange={(e) => setFilterDow(e.target.value)}
+              >
+                <option value="">Todos</option>
+                <option value="0">Lun</option>
+                <option value="1">Mar</option>
+                <option value="2">Mié</option>
+                <option value="3">Jue</option>
+                <option value="4">Vie</option>
+                <option value="5">Sáb</option>
+                <option value="6">Dom</option>
+              </select>
+            </div>
+            <div className="sigma-control">
+              <label>Hora:</label>
+              <select
+                className="selector"
+                value={filterHour}
+                onChange={(e) => setFilterHour(e.target.value)}
+              >
+                <option value="">Todas</option>
+                {Array.from({ length: 24 }, (_, h) => (
+                  <option key={h} value={h}>{String(h).padStart(2, "0")}h</option>
+                ))}
+              </select>
+            </div>
+            <div className="sigma-control">
+              <label>Umbral z:</label>
+              <select
+                className="selector"
+                value={threshold}
+                onChange={(e) => setThreshold(Number(e.target.value))}
+              >
+                <option value="4">4 (más laxo)</option>
+                <option value="6">6 (estándar)</option>
+                <option value="8">8 (estricto)</option>
+                <option value="10">10 (muy estricto)</option>
+              </select>
+            </div>
           </div>
         }
       >
@@ -407,33 +480,42 @@ export default function App() {
               <tr>
                 <th>#</th>
                 <th>Timestamp</th>
+                <th style={{ textAlign: "center" }}>Día</th>
+                <th style={{ textAlign: "center" }}>Hora</th>
                 <th style={{ textAlign: "center" }}>Tipo</th>
-                <th style={{ textAlign: "right" }}>Tasa</th>
-                <th style={{ textAlign: "right" }}>z-score</th>
-                <th style={{ textAlign: "right" }}>Promedio hora</th>
+                <th style={{ textAlign: "right" }}>Flujo</th>
+                <th style={{ textAlign: "right" }}>z</th>
+                <th style={{ textAlign: "right" }}>Mediana hora</th>
               </tr>
             </thead>
             <tbody>
-              {anomalies.top.map((a, i) => (
-                <tr key={i}>
-                  <td>{i + 1}</td>
-                  <td>{fmtDateTime(a.timestamp)}</td>
-                  <td style={{ textAlign: "center" }}>
-                    <span className={`badge ${a.direction === "up" ? "badge-up" : "badge-down"}`}>
-                      {a.direction === "up" ? "▲ Apertura" : "▼ Cierre"}
-                    </span>
-                  </td>
-                  <td style={{ textAlign: "right", fontWeight: 600 }}>
-                    {a.rate_per_sec >= 0 ? "+" : ""}{fmtDec.format(a.rate_per_sec)} /s
-                  </td>
-                  <td style={{ textAlign: "right", color: a.z_score > 0 ? COLOR_UP : COLOR_DOWN, fontWeight: 600 }}>
-                    {a.z_score > 0 ? "+" : ""}{fmtDec.format(a.z_score)}σ
-                  </td>
-                  <td style={{ textAlign: "right", color: "#5A5550" }}>
-                    {fmtDec.format(a.hourly_mean)} /s
-                  </td>
-                </tr>
-              ))}
+              {anomalies.top.map((a, i) => {
+                const isGrowth = a.direction === "growth_spike";
+                return (
+                  <tr key={i}>
+                    <td>{i + 1}</td>
+                    <td>{fmtDateTime(a.timestamp)}</td>
+                    <td style={{ textAlign: "center", color: "#5A5550" }}>{a.dow}</td>
+                    <td style={{ textAlign: "center", fontFamily: "ui-monospace, monospace", color: "#5A5550" }}>
+                      {String(a.hour).padStart(2, "0")}h
+                    </td>
+                    <td style={{ textAlign: "center" }}>
+                      <span className={`badge ${isGrowth ? "badge-up" : "badge-down"}`}>
+                        {isGrowth ? "▲ Crecimiento" : "▼ Decrecimiento"}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: "right", fontWeight: 600 }}>
+                      {a.net_flow >= 0 ? "+" : ""}{fmtDec.format(a.net_flow)} /s
+                    </td>
+                    <td style={{ textAlign: "right", color: a.z_robust > 0 ? COLOR_UP : COLOR_DOWN, fontWeight: 600 }}>
+                      {a.z_robust > 0 ? "+" : ""}{fmtDec.format(a.z_robust)}
+                    </td>
+                    <td style={{ textAlign: "right", color: "#5A5550" }}>
+                      {fmtDec.format(a.hour_median)} /s
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         ) : (

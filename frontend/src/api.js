@@ -28,10 +28,16 @@ export const api = {
 
   dailyPattern: () => fetchJSON("/api/daily-pattern"),
 
+  byDate: () => fetchJSON("/api/by-date"),
+
   heatmap: () => fetchJSON("/api/heatmap"),
 
-  anomalies: ({ sigma = 3, topN = 15 } = {}) =>
-    fetchJSON(`/api/anomalies?sigma=${sigma}&top_n=${topN}`),
+  anomalies: ({ threshold = 6, topN = 15, hour, dow } = {}) => {
+    const params = new URLSearchParams({ threshold, top_n: topN });
+    if (hour !== undefined && hour !== null && hour !== "") params.append("hour", hour);
+    if (dow !== undefined && dow !== null && dow !== "") params.append("dow", dow);
+    return fetchJSON(`/api/anomalies?${params.toString()}`);
+},
 
   forecast: () => fetchJSON("/api/forecast"),
 

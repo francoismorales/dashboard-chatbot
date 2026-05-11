@@ -7,21 +7,22 @@
   },
   "metrics": {
     "synthetic_monitoring_visible_stores": {
-      "value_start": 37.0,
-      "value_end": 5630566.0,
-      "total_growth": 5630529.0,
-      "avg_rate_up": 335.51,
-      "avg_rate_down": 432.78,
-      "net_flow": 11.18,
-      "n_up_points": 38665,
-      "n_down_points": 28242,
-      "max_rate_up": 19532.4,
-      "max_rate_down": 18648.1,
-      "peak_up_at": "2026-02-09T20:40:50-05:00",
-      "peak_down_at": "2026-02-09T20:45:50-05:00",
-      "avg_rate_per_sec": 11.18,
-      "max_rate_per_sec": 19532.4,
-      "peak_rate_at": "2026-02-09T20:40:50-05:00"
+      "value_first_observation": 37.0,
+      "value_last_observation": 5630566.0,
+      "value_max": 6198472.0,
+      "value_max_at": "2026-02-06T16:01:10-05:00",
+      "value_min": 0.0,
+      "value_mean": 3208766.74,
+      "avg_net_flow": 9.96,
+      "avg_growth_when_positive": 335.51,
+      "avg_attrition_when_negative": 435.13,
+      "n_samples_growing": 38658,
+      "n_samples_shrinking": 28271,
+      "n_samples_total": 67123,
+      "max_net_growth_per_sec": 19532.4,
+      "max_net_attrition_per_sec": 18648.1,
+      "peak_growth_at": "2026-02-09T20:40:50-05:00",
+      "peak_attrition_at": "2026-02-09T20:45:50-05:00"
     }
   }
 }

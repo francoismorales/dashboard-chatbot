@@ -9,10 +9,10 @@ const BASE_URL = "http://localhost:8000";
 
 // Preguntas sugeridas que aparecen al abrir el chat por primera vez
 const SUGGESTED_QUESTIONS = [
-  "¿Cuál fue el pico más grande de aperturas?",
-  "¿Cómo se comporta la actividad a las 8pm?",
-  "¿Qué día de la semana tiene más cierres?",
-  "Compara el lunes vs el domingo",
+  "¿Cuándo ocurrió el mayor crecimiento neto?",
+  "¿Cómo se comporta el flujo a las 8 de la noche?",
+  "¿Qué día tuvo el pico más alto de tiendas visibles?",
+  "Compara los lunes con los domingos",
 ];
 
 export default function ChatBot() {
@@ -118,7 +118,7 @@ export default function ChatBot() {
         {messages.length === 0 && (
           <div className="chat-welcome">
             <div className="chat-welcome-icon">✨</div>
-            <p>Hola, analizo los datos de disponibilidad de tiendas Rappi. Puedo consultar estadísticas por hora, día, comparar períodos o encontrar eventos extremos.</p>
+            <p>Hola, analizo los datos de disponibilidad de tiendas Rappi. Puedo consultar el flujo neto por hora o día, comparar períodos, encontrar eventos atípicos y explicar la predicción.</p>
             <div className="chat-suggestions">
               <div className="chat-suggestions-label">Prueba preguntando:</div>
               {SUGGESTED_QUESTIONS.map((q, i) => (
